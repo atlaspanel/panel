@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -91,12 +92,20 @@ type ShellProxy struct {
 	mutex      sync.Mutex
 }
 
+type RateLimiter struct {
+	requests map[string][]time.Time
+	mutex    sync.RWMutex
+	limit    int
+	window   time.Duration
+}
+
 type API struct {
-	db       *sql.DB
-	config   *Config
-	upgrader websocket.Upgrader
-	shells   map[string]*ShellProxy
-	shellMu  sync.RWMutex
+	db          *sql.DB
+	config      *Config
+	upgrader    websocket.Upgrader
+	shells      map[string]*ShellProxy
+	shellMu     sync.RWMutex
+	rateLimiter *RateLimiter
 }
 
 func main() {
@@ -116,18 +125,68 @@ func main() {
 		config: config,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow connections from any origin for now
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					// Allow connections without origin header (direct tools)
+					return true
+				}
+				
+				// Check if origin is in the allowed CORS origins
+				for _, allowedOrigin := range config.CORS.AllowOrigins {
+					if allowedOrigin == "*" {
+						// If wildcard is configured, allow all (should be avoided in production)
+						return true
+					}
+					if origin == allowedOrigin {
+						return true
+					}
+				}
+				
+				return false
 			},
 		},
 		shells: make(map[string]*ShellProxy),
+		rateLimiter: &RateLimiter{
+			requests: make(map[string][]time.Time),
+			limit:    30, // 30 requests per minute
+			window:   time.Minute,
+		},
 	}
 	api.initDB()
 
 	r := gin.Default()
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", strings.Join(config.CORS.AllowOrigins, ", "))
-		c.Header("Access-Control-Allow-Methods", strings.Join(config.CORS.AllowMethods, ", "))
-		c.Header("Access-Control-Allow-Headers", strings.Join(config.CORS.AllowHeaders, ", "))
+		origin := c.Request.Header.Get("Origin")
+		
+		// Set CORS headers based on origin validation
+		if origin != "" {
+			allowed := false
+			for _, allowedOrigin := range config.CORS.AllowOrigins {
+				if allowedOrigin == "*" {
+					// If wildcard is configured, allow but be explicit about it
+					c.Header("Access-Control-Allow-Origin", origin)
+					allowed = true
+					break
+				} else if origin == allowedOrigin {
+					c.Header("Access-Control-Allow-Origin", allowedOrigin)
+					allowed = true
+					break
+				}
+			}
+			
+			if !allowed {
+				// Don't set CORS headers for unauthorized origins
+				if c.Request.Method == "OPTIONS" {
+					c.AbortWithStatus(403)
+					return
+				}
+			} else {
+				c.Header("Access-Control-Allow-Methods", strings.Join(config.CORS.AllowMethods, ", "))
+				c.Header("Access-Control-Allow-Headers", strings.Join(config.CORS.AllowHeaders, ", "))
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+		}
+		
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -135,8 +194,8 @@ func main() {
 		c.Next()
 	})
 
-	// Auth routes
-	r.POST("/auth/login", api.login)
+	// Auth routes with rate limiting
+	r.POST("/auth/login", api.rateLimitMiddleware(), api.login)
 	r.POST("/auth/logout", api.logout)
 	
 	// User management routes (admin only)
@@ -896,4 +955,61 @@ func (api *API) proxyShellSession(proxy *ShellProxy) {
 	
 	// Wait for either direction to close
 	<-done
+}
+
+func (rl *RateLimiter) isAllowed(clientIP string) bool {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+	
+	now := time.Now()
+	
+	// Clean old requests outside the time window
+	if requests, exists := rl.requests[clientIP]; exists {
+		var validRequests []time.Time
+		for _, requestTime := range requests {
+			if now.Sub(requestTime) < rl.window {
+				validRequests = append(validRequests, requestTime)
+			}
+		}
+		rl.requests[clientIP] = validRequests
+	}
+	
+	// Check if under limit
+	if len(rl.requests[clientIP]) < rl.limit {
+		rl.requests[clientIP] = append(rl.requests[clientIP], now)
+		return true
+	}
+	
+	return false
+}
+
+func (api *API) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		clientIP := c.ClientIP()
+		
+		// Extract real IP if behind proxy
+		if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
+			ips := strings.Split(forwarded, ",")
+			if len(ips) > 0 {
+				clientIP = strings.TrimSpace(ips[0])
+			}
+		} else if realIP := c.GetHeader("X-Real-IP"); realIP != "" {
+			clientIP = realIP
+		}
+		
+		// Validate IP format
+		if net.ParseIP(clientIP) == nil {
+			clientIP = c.ClientIP() // fallback to gin's method
+		}
+		
+		if !api.rateLimiter.isAllowed(clientIP) {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "Rate limit exceeded. Please try again later.",
+			})
+			c.Abort()
+			return
+		}
+		
+		c.Next()
+	}
 }

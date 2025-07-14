@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -90,7 +91,20 @@ func NewAgent(configFile string) (*Agent, error) {
 		client: &http.Client{Timeout: 10 * time.Second},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow connections from any origin for now
+				// Only allow connections from the configured API endpoint
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					// Allow connections without origin header (direct tools)
+					return true
+				}
+				
+				// Parse the configured API endpoint to get allowed origin
+				if apiURL, err := url.Parse(config.APIEndpoint); err == nil {
+					allowedOrigin := fmt.Sprintf("%s://%s", apiURL.Scheme, apiURL.Host)
+					return origin == allowedOrigin
+				}
+				
+				return false
 			},
 		},
 		sessions: make(map[string]*ShellSession),
