@@ -1074,7 +1074,7 @@ class AtlasPanel {
           <span style="color: var(--border-medium);">•</span>
           <a href="https://getatlas.dev" target="_blank" rel="noopener noreferrer" style="color: var(--primary-green); text-decoration: none; font-weight: 500; transition: color 0.2s ease;">getatlas.dev</a>
           <span style="color: var(--border-medium);">•</span>
-          <span style="font-size: 13px; color: var(--text-secondary);">v0.0.1</span>
+          <span style="font-size: 13px; color: var(--text-secondary);">v0.0.2</span>
         </div>
       </footer>
     `

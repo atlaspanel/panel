@@ -93,4 +93,4 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 ## Links
 
 - **Website**: [getatlas.dev](https://getatlas.dev)
-- **Version**: 0.0.1 (Early Beta)
+- **Version**: 0.0.2 (Early Beta)
