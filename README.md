@@ -4,6 +4,7 @@
   <img src="assets/logo-transparent.png" alt="Atlas Panel Logo" width="120" height="120">
   <h3>Server Management System</h3>
   <p>A modern, secure server monitoring and management platform</p>
+  <p><strong>🚧 Early Beta Release - Not recommended for production use</strong></p>
 </div>
 
 ## Features
@@ -87,9 +88,9 @@ cd panel && npm run dev
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ## Links
 
 - **Website**: [getatlas.dev](https://getatlas.dev)
-- **Version**: 0.0.1
+- **Version**: 0.0.1 (Early Beta)
