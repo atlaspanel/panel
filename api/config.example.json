@@ -1,0 +1,22 @@
+{
+  "server": {
+    "port": "8080",
+    "host": "localhost"
+  },
+  "database": {
+    "path": "./atlas.db"
+  },
+  "jwt": {
+    "secret": "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
+    "expiration_hours": 24
+  },
+  "heartbeat": {
+    "interval_seconds": 30,
+    "timeout_seconds": 60
+  },
+  "cors": {
+    "allow_origins": ["*"],
+    "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"]
+  }
+}

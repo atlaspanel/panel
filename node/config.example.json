@@ -1,0 +1,4 @@
+{
+  "api_endpoint": "http://localhost:8080",
+  "key": "your-node-key-here"
+}

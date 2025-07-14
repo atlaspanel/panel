@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atlas Panel</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  </head>
+  <body>
+    <div id="app">
+      <nav class="sidebar">
+        <div class="sidebar-header">
+          <h1>Atlas Panel</h1>
+        </div>
+        <ul class="nav-menu">
+          <li class="nav-item active" data-page="dashboard">
+            <span>Dashboard</span>
+          </li>
+          <li class="nav-item" data-page="nodes">
+            <span>Nodes</span>
+          </li>
+          <li class="nav-item" data-page="users" data-admin-only>
+            <span>Users</span>
+          </li>
+          <li class="nav-item" data-page="account">
+            <span>Account</span>
+          </li>
+        </ul>
+      </nav>
+      
+      <main class="main-content">
+        <header class="content-header">
+          <h2 id="page-title">Dashboard</h2>
+        </header>
+        
+        <div class="content-body">
+          <!-- Dashboard Page -->
+          <div id="dashboard-page" class="page active">
+            <div class="stats-grid">
+              <div class="stat-card">
+                <div class="stat-icon">
+                  <i class="fas fa-server"></i>
+                </div>
+                <div class="stat-content">
+                  <h3>Total Nodes</h3>
+                  <div class="stat-value" id="total-nodes">0</div>
+                </div>
+              </div>
+              
+              <div class="stat-card">
+                <div class="stat-icon online">
+                  <i class="fas fa-check-circle"></i>
+                </div>
+                <div class="stat-content">
+                  <h3>Online Nodes</h3>
+                  <div class="stat-value" id="online-nodes">0</div>
+                </div>
+              </div>
+              
+              <div class="stat-card">
+                <div class="stat-icon offline">
+                  <i class="fas fa-times-circle"></i>
+                </div>
+                <div class="stat-content">
+                  <h3>Offline Nodes</h3>
+                  <div class="stat-value" id="offline-nodes">0</div>
+                </div>
+              </div>
+              
+              <div class="stat-card">
+                <div class="stat-icon">
+                  <i class="fas fa-chart-pie"></i>
+                </div>
+                <div class="stat-content">
+                  <h3>Status Ratio</h3>
+                  <div class="stat-value" id="status-ratio">0/0</div>
+                </div>
+              </div>
+            </div>
+            
+            <section class="recent-nodes">
+              <h3>Recent Nodes</h3>
+              <div id="dashboard-nodes-list"></div>
+            </section>
+          </div>
+
+          <!-- Nodes Page -->
+          <div id="nodes-page" class="page">
+            <div id="add-node-section" class="page-section">
+              <div class="section-header">
+                <h3>Add New Node</h3>
+                <p>Configure a new server to monitor</p>
+              </div>
+              <form id="add-node-form" class="add-node-form">
+                <div class="form-grid">
+                  <input type="text" id="node-name" placeholder="Node name" required>
+                  <input type="url" id="node-url" placeholder="Node URL (e.g., http://192.168.1.100:3040)" required>
+                  <button type="submit">
+                    <i class="fas fa-plus"></i>
+                    Add Node
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div class="page-section">
+              <div class="section-header">
+                <h3>All Nodes</h3>
+                <p>Manage your server nodes</p>
+              </div>
+              <div class="nodes-container">
+                <div id="nodes-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Users Page -->
+          <div id="users-page" class="page">
+            <div class="page-section">
+              <div class="section-header">
+                <h3>Add New User</h3>
+                <p>Create a new user account</p>
+              </div>
+              <form id="add-user-form" class="add-node-form">
+                <div class="form-grid">
+                  <input type="text" id="user-username" placeholder="Username" required>
+                  <input type="password" id="user-password" placeholder="Password" required>
+                  <select id="user-role" required style="padding: 12px 16px; border: 1px solid #dee2e6; border-radius: 6px; font-size: 14px; background: white;">
+                    <option value="">Select Role</option>
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button type="submit">
+                    <i class="fas fa-user-plus"></i>
+                    Add User
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div class="page-section">
+              <div class="section-header">
+                <h3>All Users</h3>
+                <p>Manage user accounts</p>
+              </div>
+              <div class="nodes-container">
+                <div id="users-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Account Page -->
+          <div id="account-page" class="page">
+            <div class="page-section">
+              <div class="section-header">
+                <h3>Change Password</h3>
+                <p>Update your account password</p>
+              </div>
+              <form id="change-password-form" class="add-node-form">
+                <div class="form-grid">
+                  <input type="password" id="current-password" placeholder="Current Password" required>
+                  <input type="password" id="new-password" placeholder="New Password" required>
+                  <button type="submit">
+                    <i class="fas fa-key"></i>
+                    Change Password
+                  </button>
+                </div>
+                <div id="password-message" style="margin-top: 15px; padding: 10px; border-radius: 4px; display: none;"></div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
