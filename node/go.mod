@@ -3,6 +3,7 @@ module atlas-panel-node
 go 1.21
 
 require (
+	github.com/gorilla/websocket v1.5.0
 	github.com/shirou/gopsutil/v3 v3.23.9
 	github.com/spf13/cobra v1.7.0
 )

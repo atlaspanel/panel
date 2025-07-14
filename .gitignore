@@ -38,10 +38,17 @@ Thumbs.db
 
 # Go specific
 api/atlas-panel-api
+api/atlas-api
 api/*.exe
 api/*.dll
 api/*.so
 api/*.dylib
+node/atlas-panel-node
+node/atlas-node
+node/*.exe
+node/*.dll
+node/*.so
+node/*.dylib
 go.work
 go.work.sum
 

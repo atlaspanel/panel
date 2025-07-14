@@ -1,4 +1,6 @@
 import './style.css'
+import { NodeTerminal, type TerminalOptions } from './terminal'
+import { SimpleTerminal, type SimpleTerminalOptions } from './simple-terminal'
 
 interface Node {
   id: string
@@ -41,9 +43,10 @@ interface MeResponse {
 
 class AtlasPanel {
   private apiUrl = 'http://localhost:8080'
-  private currentPage = 'dashboard'
   private authToken: string | null = null
   private currentUser: User | null = null
+  private currentTerminal: NodeTerminal | SimpleTerminal | null = null
+  private useSimpleTerminal = true // Use simple terminal by default
 
   private getAuthHeaders(): HeadersInit {
     const headers: HeadersInit = {
@@ -424,7 +427,6 @@ class AtlasPanel {
     }
     
     document.getElementById('page-title')!.textContent = titles[page] || page
-    this.currentPage = page
     
     // Load page-specific data
     if (page === 'users') {
@@ -452,8 +454,6 @@ class AtlasPanel {
     if (!loginPage) {
       this.createLoginPage()
     }
-    
-    this.currentPage = 'login'
   }
 
   async showNodePage(nodeId: string): Promise<void> {
@@ -553,6 +553,25 @@ class AtlasPanel {
             </div>
           </div>
         </div>
+
+        ${isAdmin && node.status === 'online' ? `
+        <div class="detail-card">
+          <h4>Remote Shell Access</h4>
+          <div class="shell-access-section">
+            <div class="shell-access-warning">
+              <i class="fas fa-exclamation-triangle"></i>
+              <div>
+                <strong>Security Warning:</strong> Shell access provides full control over the remote system. 
+                Only use this feature if you trust the node and understand the security implications.
+              </div>
+            </div>
+            <button class="shell-btn" onclick="panel.openShell('${node.id}', '${node.name}')">
+              <i class="fas fa-terminal"></i>
+              Open Shell
+            </button>
+          </div>
+        </div>
+        ` : ''}
       </div>
     `
 
@@ -909,7 +928,7 @@ class AtlasPanel {
         'admin': '<span class="role-badge admin"><i class="fas fa-user-shield"></i> Administrator</span>',
         'user': '<span class="role-badge user"><i class="fas fa-user"></i> User</span>'
       }
-      return badges[role] || `<span class="role-badge">${role}</span>`
+      return badges[role as keyof typeof badges] || `<span class="role-badge">${role}</span>`
     }
 
     usersList.innerHTML = `
@@ -1105,6 +1124,124 @@ class AtlasPanel {
       addNodeSection.style.display = isAdmin ? 'block' : 'none'
     }
     
+  }
+
+  openShell(nodeId: string, nodeName: string): void {
+    if (!this.authToken) {
+      this.showLoginPage()
+      return
+    }
+
+    // Check if user has admin privileges
+    if (this.currentUser?.role !== 'admin' && this.currentUser?.role !== 'sys') {
+      alert('Shell access requires administrator privileges')
+      return
+    }
+
+    // Close any existing terminal
+    this.closeShell()
+
+    // Create terminal container
+    const terminalContainer = document.createElement('div')
+    terminalContainer.className = 'terminal-container'
+    terminalContainer.innerHTML = `
+      <div class="terminal-modal">
+        <div class="terminal-header">
+          <div class="terminal-title">
+            <i class="fas fa-terminal"></i>
+            Shell: ${nodeName}
+          </div>
+          <div class="terminal-controls">
+            <button class="terminal-btn reconnect" onclick="panel.reconnectShell()">
+              <i class="fas fa-redo"></i> Reconnect
+            </button>
+            <button class="terminal-btn close" onclick="panel.closeShell()">
+              <i class="fas fa-times"></i> Close
+            </button>
+          </div>
+        </div>
+        <div class="terminal-body">
+          <div class="terminal-wrapper" id="terminal-wrapper"></div>
+        </div>
+      </div>
+    `
+
+    // Add to page
+    document.body.appendChild(terminalContainer)
+
+    // Initialize terminal
+    const terminalWrapper = document.getElementById('terminal-wrapper')!
+    
+    if (this.useSimpleTerminal) {
+      const terminalOptions: SimpleTerminalOptions = {
+        nodeId,
+        nodeName,
+        apiUrl: this.apiUrl,
+        authToken: this.authToken,
+        onClose: () => this.closeShell(),
+        onError: (error) => {
+          console.error('Terminal error:', error)
+          alert(`Terminal error: ${error}`)
+        }
+      }
+
+      this.currentTerminal = new SimpleTerminal(terminalWrapper, terminalOptions)
+    } else {
+      const terminalOptions: TerminalOptions = {
+        nodeId,
+        nodeName,
+        apiUrl: this.apiUrl,
+        authToken: this.authToken,
+        onClose: () => this.closeShell(),
+        onError: (error) => {
+          console.error('Terminal error:', error)
+          alert(`Terminal error: ${error}`)
+        }
+      }
+
+      this.currentTerminal = new NodeTerminal(terminalWrapper, terminalOptions)
+    }
+    
+    this.currentTerminal.init()
+
+    // Focus the terminal after initialization
+    setTimeout(() => {
+      this.currentTerminal?.focus()
+    }, 200)
+
+    // Handle ESC key to close terminal
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        this.closeShell()
+        document.removeEventListener('keydown', handleEscape)
+      }
+    }
+    document.addEventListener('keydown', handleEscape)
+
+    // Handle click outside to close
+    terminalContainer.addEventListener('click', (e) => {
+      if (e.target === terminalContainer) {
+        this.closeShell()
+      }
+    })
+  }
+
+  reconnectShell(): void {
+    if (this.currentTerminal) {
+      this.currentTerminal.reconnect()
+    }
+  }
+
+  closeShell(): void {
+    if (this.currentTerminal) {
+      this.currentTerminal.dispose()
+      this.currentTerminal = null
+    }
+
+    const terminalContainer = document.querySelector('.terminal-container')
+    if (terminalContainer) {
+      terminalContainer.remove()
+    }
   }
 }
 

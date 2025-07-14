@@ -3,16 +3,20 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -77,9 +81,22 @@ type Config struct {
 	} `json:"cors"`
 }
 
+type ShellProxy struct {
+	clientConn *websocket.Conn
+	nodeConn   *websocket.Conn
+	nodeID     string
+	userID     string
+	username   string
+	startTime  time.Time
+	mutex      sync.Mutex
+}
+
 type API struct {
-	db     *sql.DB
-	config *Config
+	db       *sql.DB
+	config   *Config
+	upgrader websocket.Upgrader
+	shells   map[string]*ShellProxy
+	shellMu  sync.RWMutex
 }
 
 func main() {
@@ -97,6 +114,12 @@ func main() {
 	api := &API{
 		db:     db,
 		config: config,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Allow connections from any origin for now
+			},
+		},
+		shells: make(map[string]*ShellProxy),
 	}
 	api.initDB()
 
@@ -131,6 +154,9 @@ func main() {
 		authorized.POST("/nodes", api.requireAdmin(), api.createNode)
 		authorized.DELETE("/nodes/:id", api.requireAdmin(), api.deleteNode)
 	}
+	
+	// Shell access (admin/sys only) - auth handled inside handler for WebSocket compatibility
+	r.GET("/nodes/:id/shell", api.handleShellProxy)
 	
 	// Heartbeat doesn't need user auth, only node key
 	r.POST("/heartbeat", api.heartbeat)
@@ -653,4 +679,221 @@ func loadConfig() (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func (api *API) parseJWTToken(tokenString string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(api.config.JWT.Secret), nil
+	})
+
+	if err != nil || !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+
+	return claims, nil
+}
+
+func (api *API) handleShellProxy(c *gin.Context) {
+	nodeID := c.Param("id")
+	
+	// Handle WebSocket auth differently since browsers don't support custom headers on WebSocket
+	// Check for token in query parameter first, then fall back to normal auth
+	var userID, username, role interface{}
+	var authOk bool
+	
+	if token := c.Query("token"); token != "" {
+		// Parse JWT token from query parameter
+		claims, err := api.parseJWTToken(token)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			return
+		}
+		userID = claims.UserID
+		username = claims.Username
+		role = claims.Role
+		authOk = true
+	} else {
+		// Try normal middleware auth
+		userID, authOk = c.Get("user_id")
+		if authOk {
+			username, _ = c.Get("username")
+			role, _ = c.Get("role")
+		}
+	}
+	
+	if !authOk {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+	
+	// Additional role check (redundant but good practice)
+	if role != "admin" && role != "sys" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Shell access requires admin privileges"})
+		return
+	}
+	
+	// Get node info from database
+	var node Node
+	err := api.db.QueryRow(
+		"SELECT id, name, url, key, status FROM nodes WHERE id = ?",
+		nodeID,
+	).Scan(&node.ID, &node.Name, &node.URL, &node.Key, &node.Status)
+	
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Node not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query node"})
+		}
+		return
+	}
+	
+	// Check if node is online
+	if node.Status != "online" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Node is offline"})
+		return
+	}
+	
+	// Upgrade client connection to WebSocket
+	clientConn, err := api.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade client connection: %v", err)
+		return
+	}
+	
+	log.Printf("Shell access requested by user %s (%s) for node %s (%s)", 
+		username, userID, node.Name, node.ID)
+	
+	// Create proxy session
+	proxy := &ShellProxy{
+		clientConn: clientConn,
+		nodeID:     node.ID,
+		userID:     userID.(string),
+		username:   username.(string),
+		startTime:  time.Now(),
+	}
+	
+	// Connect to node's shell endpoint
+	if err := api.connectToNodeShell(proxy, &node); err != nil {
+		log.Printf("Failed to connect to node shell: %v", err)
+		clientConn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to node shell: "+err.Error()))
+		clientConn.Close()
+		return
+	}
+	
+	// Store proxy session
+	sessionID := fmt.Sprintf("%s-%s-%d", userID, nodeID, time.Now().Unix())
+	api.shellMu.Lock()
+	api.shells[sessionID] = proxy
+	api.shellMu.Unlock()
+	
+	// Clean up when session ends
+	defer func() {
+		api.shellMu.Lock()
+		delete(api.shells, sessionID)
+		api.shellMu.Unlock()
+		
+		log.Printf("Shell session ended: user %s, node %s, duration %v", 
+			proxy.username, proxy.nodeID, time.Since(proxy.startTime))
+	}()
+	
+	// Start proxying
+	api.proxyShellSession(proxy)
+}
+
+func (api *API) connectToNodeShell(proxy *ShellProxy, node *Node) error {
+	// Parse node URL to get WebSocket URL
+	nodeURL, err := url.Parse(node.URL)
+	if err != nil {
+		return fmt.Errorf("invalid node URL: %v", err)
+	}
+	
+	// Convert HTTP URL to WebSocket URL
+	wsScheme := "ws"
+	if nodeURL.Scheme == "https" {
+		wsScheme = "wss"
+	}
+	
+	shellURL := fmt.Sprintf("%s://%s/shell", wsScheme, nodeURL.Host)
+	
+	// Create headers with node authentication
+	headers := http.Header{}
+	headers.Set("Authorization", node.Key)
+	
+	// Connect to node's shell endpoint
+	nodeConn, _, err := websocket.DefaultDialer.Dial(shellURL, headers)
+	if err != nil {
+		return fmt.Errorf("failed to dial node shell: %v", err)
+	}
+	
+	proxy.nodeConn = nodeConn
+	return nil
+}
+
+func (api *API) proxyShellSession(proxy *ShellProxy) {
+	defer func() {
+		if proxy.clientConn != nil {
+			proxy.clientConn.Close()
+		}
+		if proxy.nodeConn != nil {
+			proxy.nodeConn.Close()
+		}
+	}()
+	
+	// Channel to signal completion
+	done := make(chan bool, 2)
+	
+	// Proxy messages from client to node
+	go func() {
+		defer func() { done <- true }()
+		for {
+			_, message, err := proxy.clientConn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("Client websocket read error: %v", err)
+				}
+				return
+			}
+			
+			proxy.mutex.Lock()
+			err = proxy.nodeConn.WriteMessage(websocket.TextMessage, message)
+			proxy.mutex.Unlock()
+			
+			if err != nil {
+				log.Printf("Failed to write to node: %v", err)
+				return
+			}
+		}
+	}()
+	
+	// Proxy messages from node to client
+	go func() {
+		defer func() { done <- true }()
+		for {
+			_, message, err := proxy.nodeConn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("Node websocket read error: %v", err)
+				}
+				return
+			}
+			
+			proxy.mutex.Lock()
+			err = proxy.clientConn.WriteMessage(websocket.TextMessage, message)
+			proxy.mutex.Unlock()
+			
+			if err != nil {
+				log.Printf("Failed to write to client: %v", err)
+				return
+			}
+		}
+	}()
+	
+	// Wait for either direction to close
+	<-done
 }

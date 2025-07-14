@@ -1,16 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -34,9 +39,22 @@ type SystemInfo struct {
 	Uptime      uint64  `json:"uptime"`
 }
 
+type ShellSession struct {
+	conn    *websocket.Conn
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  io.ReadCloser
+	cleanup chan bool
+	mutex   sync.Mutex
+}
+
 type Agent struct {
-	config Config
-	client *http.Client
+	config    Config
+	client    *http.Client
+	upgrader  websocket.Upgrader
+	sessions  map[string]*ShellSession
+	sessionMu sync.RWMutex
 }
 
 func main() {
@@ -70,6 +88,12 @@ func NewAgent(configFile string) (*Agent, error) {
 	return &Agent{
 		config: config,
 		client: &http.Client{Timeout: 10 * time.Second},
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Allow connections from any origin for now
+			},
+		},
+		sessions: make(map[string]*ShellSession),
 	}, nil
 }
 
@@ -119,6 +143,8 @@ func (a *Agent) startServer() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "online", "agent": "atlas-panel-node"}`))
 	})
+
+	http.HandleFunc("/shell", a.handleShellConnection)
 
 	log.Printf("Starting node server on :3040")
 	if err := http.ListenAndServe(":3040", nil); err != nil {
@@ -223,4 +249,167 @@ func (a *Agent) sendHeartbeat() {
 	} else {
 		log.Printf("Heartbeat failed with status: %d", resp.StatusCode)
 	}
+}
+
+func (a *Agent) handleShellConnection(w http.ResponseWriter, r *http.Request) {
+	// Authenticate the request using the node key
+	authKey := r.Header.Get("Authorization")
+	if authKey != a.config.Key {
+		log.Printf("Shell connection denied: invalid authentication key")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Upgrade to WebSocket
+	conn, err := a.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade to websocket: %v", err)
+		return
+	}
+
+	log.Printf("New shell connection established")
+	session := a.createShellSession(conn)
+	if session == nil {
+		conn.Close()
+		return
+	}
+
+	// Handle the session
+	go a.handleShellSession(session)
+}
+
+func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
+	// Determine shell command based on OS
+	var shellCmd string
+	var shellArgs []string
+	
+	switch runtime.GOOS {
+	case "windows":
+		shellCmd = "cmd"
+		shellArgs = []string{"/C", "cmd"}
+	default:
+		shellCmd = "/bin/bash"
+		shellArgs = []string{"-i"}
+	}
+
+	cmd := exec.Command(shellCmd, shellArgs...)
+	
+	// Create pipes for stdin, stdout, stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("Failed to create stdin pipe: %v", err)
+		return nil
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("Failed to create stdout pipe: %v", err)
+		stdin.Close()
+		return nil
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("Failed to create stderr pipe: %v", err)
+		stdin.Close()
+		stdout.Close()
+		return nil
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start shell: %v", err)
+		stdin.Close()
+		stdout.Close()
+		stderr.Close()
+		return nil
+	}
+
+	session := &ShellSession{
+		conn:    conn,
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		stderr:  stderr,
+		cleanup: make(chan bool, 1),
+	}
+
+	// Store session for management
+	sessionID := fmt.Sprintf("%p", session)
+	a.sessionMu.Lock()
+	a.sessions[sessionID] = session
+	a.sessionMu.Unlock()
+
+	// Set up cleanup when session ends
+	go func() {
+		<-session.cleanup
+		a.sessionMu.Lock()
+		delete(a.sessions, sessionID)
+		a.sessionMu.Unlock()
+	}()
+
+	return session
+}
+
+func (a *Agent) handleShellSession(session *ShellSession) {
+	defer func() {
+		session.cleanup <- true
+		session.conn.Close()
+		session.stdin.Close()
+		if session.cmd.Process != nil {
+			session.cmd.Process.Kill()
+		}
+		log.Printf("Shell session ended")
+	}()
+
+	// Goroutine to read from stdout and send to websocket
+	go func() {
+		scanner := bufio.NewScanner(session.stdout)
+		for scanner.Scan() {
+			output := scanner.Text() + "\n"
+			session.mutex.Lock()
+			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
+			session.mutex.Unlock()
+			if err != nil {
+				log.Printf("Failed to write stdout to websocket: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Goroutine to read from stderr and send to websocket
+	go func() {
+		scanner := bufio.NewScanner(session.stderr)
+		for scanner.Scan() {
+			output := scanner.Text() + "\n"
+			session.mutex.Lock()
+			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
+			session.mutex.Unlock()
+			if err != nil {
+				log.Printf("Failed to write stderr to websocket: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Read from websocket and write to stdin
+	for {
+		_, message, err := session.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("Websocket read error: %v", err)
+			}
+			break
+		}
+
+		// Write input to shell stdin
+		_, err = session.stdin.Write(message)
+		if err != nil {
+			log.Printf("Failed to write to shell stdin: %v", err)
+			break
+		}
+	}
+
+	// Wait for command to finish
+	session.cmd.Wait()
 }
