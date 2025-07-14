@@ -11,6 +11,7 @@
     <div id="app">
       <nav class="sidebar">
         <div class="sidebar-header">
+          <img src="/logo-transparent.png" alt="Atlas Panel Logo" style="width: 48px; height: 48px; margin-right: 12px; object-fit: contain;">
           <h1>Atlas Panel</h1>
         </div>
         <ul class="nav-menu">
@@ -27,6 +28,13 @@
             <span>Account</span>
           </li>
         </ul>
+        <div class="sidebar-footer">
+          <div class="sidebar-user">
+            <div class="username">Not logged in</div>
+            <div class="role">Guest</div>
+          </div>
+          <button class="sidebar-logout" id="logout-btn">Logout</button>
+        </div>
       </nav>
       
       <main class="main-content">
@@ -171,6 +179,20 @@
             </div>
           </div>
         </div>
+        
+        <footer class="main-footer">
+          <div class="footer-content">
+            <div class="footer-brand">
+              <img src="/logo-transparent.png" alt="Atlas Panel Logo" style="width: 32px; height: 32px; margin-right: 8px; object-fit: contain;">
+              <span>Atlas Panel</span>
+            </div>
+            <div class="footer-links">
+              <a href="https://getatlas.dev" target="_blank" rel="noopener noreferrer">getatlas.dev</a>
+              <span class="footer-separator">•</span>
+              <span class="footer-version">v0.0.1</span>
+            </div>
+          </div>
+        </footer>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

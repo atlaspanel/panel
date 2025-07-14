@@ -1043,28 +1043,40 @@ class AtlasPanel {
       left: 0;
       width: 100%;
       height: 100%;
-      background: #f8f9fa;
+      background: var(--background-main);
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
       z-index: 1000;
     `
     loginPage.innerHTML = `
-      <div style="max-width: 400px; width: 90%; padding: 40px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border: 1px solid #e9ecef;">
-        <div style="text-align: center; margin-bottom: 30px;">
-          <h1 style="color: #2c3e50; margin-bottom: 8px; font-size: 1.8rem; font-weight: 500;">Atlas Panel</h1>
+      <div style="max-width: 420px; width: 90%; padding: 50px 40px; background: var(--background-card); border-radius: 12px; box-shadow: 0 4px 12px rgba(133, 175, 122, 0.15); border: 1px solid var(--border-light);">
+        <div style="text-align: center; margin-bottom: 40px;">
+          <img src="/logo-transparent.png" alt="Atlas Panel Logo" style="width: 120px; height: 120px; margin-bottom: 20px; object-fit: contain;">
+          <h1 style="color: var(--text-primary); margin-bottom: 12px; font-size: 2rem; font-weight: 600; letter-spacing: -0.5px;">Atlas Panel</h1>
+          <p style="color: var(--text-secondary); font-size: 15px; margin: 0;">Server Management System</p>
         </div>
         <form id="login-form">
-          <div style="margin-bottom: 20px;">
-            <input type="text" id="login-username" placeholder="Username" required style="width: 100%; padding: 12px 16px; border: 1px solid #dee2e6; border-radius: 6px; font-size: 14px; box-sizing: border-box;">
+          <div style="margin-bottom: 24px;">
+            <input type="text" id="login-username" placeholder="Username" required style="width: 100%; padding: 14px 18px; border: 1px solid var(--border-medium); border-radius: 8px; font-size: 15px; box-sizing: border-box; background: var(--background-card); color: var(--text-primary); transition: all 0.2s;">
           </div>
-          <div style="margin-bottom: 30px;">
-            <input type="password" id="login-password" placeholder="Password" required style="width: 100%; padding: 12px 16px; border: 1px solid #dee2e6; border-radius: 6px; font-size: 14px; box-sizing: border-box;">
+          <div style="margin-bottom: 32px;">
+            <input type="password" id="login-password" placeholder="Password" required style="width: 100%; padding: 14px 18px; border: 1px solid var(--border-medium); border-radius: 8px; font-size: 15px; box-sizing: border-box; background: var(--background-card); color: var(--text-primary); transition: all 0.2s;">
           </div>
-          <button type="submit" style="width: 100%; padding: 12px 20px; background: #3498db; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer;">Login</button>
-          <div id="login-error" style="margin-top: 15px; padding: 10px; background: #f8d7da; color: #721c24; border-radius: 4px; display: none; font-size: 14px;"></div>
+          <button type="submit" style="width: 100%; padding: 14px 24px; background: var(--primary-green); color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 500; cursor: pointer; transition: all 0.2s;">Sign In</button>
+          <div id="login-error" style="margin-top: 20px; padding: 12px 16px; background: #ffeaea; color: #8b4513; border-radius: 6px; display: none; font-size: 14px; border: 1px solid #ffcccb;"></div>
         </form>
       </div>
+      <footer style="position: absolute; bottom: 30px; width: 100%; text-align: center;">
+        <div style="display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 14px; color: var(--text-secondary);">
+          <span style="font-weight: 600; color: var(--text-primary);">Atlas Panel</span>
+          <span style="color: var(--border-medium);">•</span>
+          <a href="https://getatlas.dev" target="_blank" rel="noopener noreferrer" style="color: var(--primary-green); text-decoration: none; font-weight: 500; transition: color 0.2s ease;">getatlas.dev</a>
+          <span style="color: var(--border-medium);">•</span>
+          <span style="font-size: 13px; color: var(--text-secondary);">v0.0.1</span>
+        </div>
+      </footer>
     `
     app.appendChild(loginPage)
 
@@ -1095,17 +1107,15 @@ class AtlasPanel {
   }
 
   updateSidebar(): void {
-    const userInfo = document.querySelector('.sidebar-header')
-    if (userInfo && this.currentUser) {
-      userInfo.innerHTML = `
-        <h1>Atlas Panel</h1>
-        <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #34495e; font-size: 13px; color: #bdc3c7;">
-          <div>Welcome, ${this.currentUser.username}</div>
-          <div style="font-size: 11px; color: #95a5a6; margin-top: 2px;">Role: ${this.currentUser.role}</div>
-          <button id="logout-btn" style="margin-top: 8px; padding: 4px 8px; background: #e74c3c; color: white; border: none; border-radius: 4px; font-size: 11px; cursor: pointer;">Logout</button>
-        </div>
-      `
+    if (this.currentUser) {
+      // Update user info in sidebar footer
+      const usernameEl = document.querySelector('.sidebar-user .username')
+      const roleEl = document.querySelector('.sidebar-user .role')
       
+      if (usernameEl) usernameEl.textContent = this.currentUser.username
+      if (roleEl) roleEl.textContent = this.currentUser.role
+      
+      // Set up logout button
       document.getElementById('logout-btn')?.addEventListener('click', async () => {
         await this.logout()
         window.location.href = '/'
