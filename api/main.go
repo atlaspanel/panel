@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -50,6 +54,26 @@ type User struct {
 	Password  string    `json:"-" db:"password"`
 	Role      string    `json:"role" db:"role"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+type Webhook struct {
+	ID           string    `json:"id" db:"id"`
+	Name         string    `json:"name" db:"name"`
+	Type         string    `json:"type" db:"type"` // "discord" or "custom"
+	URL          string    `json:"url" db:"url"`
+	Events       string    `json:"events" db:"events"` // JSON array of event types
+	Headers      string    `json:"headers" db:"headers"` // JSON object for custom headers
+	Secret       string    `json:"secret,omitempty" db:"secret"`
+	Enabled      bool      `json:"enabled" db:"enabled"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	LastTriggered sql.NullTime `json:"last_triggered,omitempty" db:"last_triggered"`
+	FailureCount int       `json:"failure_count" db:"failure_count"`
+}
+
+type WebhookEvent struct {
+	Type      string                 `json:"type"`
+	Timestamp time.Time              `json:"timestamp"`
+	Data      map[string]interface{} `json:"data"`
 }
 
 type Claims struct {
@@ -212,6 +236,14 @@ func main() {
 		authorized.GET("/nodes", api.getNodes)
 		authorized.POST("/nodes", api.requireAdmin(), api.createNode)
 		authorized.DELETE("/nodes/:id", api.requireAdmin(), api.deleteNode)
+		
+		// Webhook routes (admin only)
+		authorized.GET("/webhooks", api.requireAdmin(), api.getWebhooks)
+		authorized.POST("/webhooks", api.requireAdmin(), api.createWebhook)
+		authorized.GET("/webhooks/:id", api.requireAdmin(), api.getWebhook)
+		authorized.PUT("/webhooks/:id", api.requireAdmin(), api.updateWebhook)
+		authorized.DELETE("/webhooks/:id", api.requireAdmin(), api.deleteWebhook)
+		authorized.POST("/webhooks/:id/test", api.requireAdmin(), api.testWebhook)
 	}
 	
 	// Shell access (admin/sys only) - auth handled inside handler for WebSocket compatibility
@@ -257,6 +289,26 @@ func (api *API) initDB() {
 	
 	if _, err := api.db.Exec(usersQuery); err != nil {
 		log.Fatal("Failed to create users table:", err)
+	}
+
+	// Create webhooks table
+	webhooksQuery := `
+	CREATE TABLE IF NOT EXISTS webhooks (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL DEFAULT 'custom',
+		url TEXT NOT NULL,
+		events TEXT NOT NULL DEFAULT '[]',
+		headers TEXT DEFAULT '{}',
+		secret TEXT,
+		enabled BOOLEAN DEFAULT true,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_triggered DATETIME,
+		failure_count INTEGER DEFAULT 0
+	)`
+	
+	if _, err := api.db.Exec(webhooksQuery); err != nil {
+		log.Fatal("Failed to create webhooks table:", err)
 	}
 
 	// Create default admin user
@@ -318,6 +370,14 @@ func (api *API) createNode(c *gin.Context) {
 		return
 	}
 
+	// Trigger webhook event
+	go api.triggerWebhookEvent("node.created", map[string]interface{}{
+		"node_id":   node.ID,
+		"node_name": node.Name,
+		"node_url":  node.URL,
+		"message":   fmt.Sprintf("Node '%s' has been created", node.Name),
+	})
+
 	c.JSON(201, node)
 }
 
@@ -353,6 +413,14 @@ func (api *API) getNodes(c *gin.Context) {
 func (api *API) deleteNode(c *gin.Context) {
 	id := c.Param("id")
 	
+	// Get node info before deletion for webhook
+	var nodeName string
+	err := api.db.QueryRow("SELECT name FROM nodes WHERE id = ?", id).Scan(&nodeName)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "Node not found"})
+		return
+	}
+	
 	result, err := api.db.Exec("DELETE FROM nodes WHERE id = ?", id)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to delete node"})
@@ -364,6 +432,13 @@ func (api *API) deleteNode(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "Node not found"})
 		return
 	}
+
+	// Trigger webhook event
+	go api.triggerWebhookEvent("node.deleted", map[string]interface{}{
+		"node_id":   id,
+		"node_name": nodeName,
+		"message":   fmt.Sprintf("Node '%s' has been deleted", nodeName),
+	})
 
 	c.JSON(200, gin.H{"message": "Node deleted"})
 }
@@ -378,6 +453,14 @@ func (api *API) heartbeat(c *gin.Context) {
 	var systemInfo SystemInfo
 	if err := c.ShouldBindJSON(&systemInfo); err != nil {
 		c.JSON(400, gin.H{"error": "Invalid system info"})
+		return
+	}
+
+	// Get current node status to check for status changes
+	var nodeID, nodeName, currentStatus string
+	err := api.db.QueryRow("SELECT id, name, status FROM nodes WHERE key = ?", key).Scan(&nodeID, &nodeName, &currentStatus)
+	if err != nil {
+		c.JSON(401, gin.H{"error": "Invalid node key"})
 		return
 	}
 
@@ -396,6 +479,20 @@ func (api *API) heartbeat(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "Failed to update heartbeat"})
 		return
 	}
+
+	// Check for status change (offline -> online)
+	if currentStatus != "online" {
+		go api.triggerWebhookEvent("node.status.changed", map[string]interface{}{
+			"node_id":     nodeID,
+			"node_name":   nodeName,
+			"status":      "online",
+			"old_status":  currentStatus,
+			"message":     fmt.Sprintf("Node '%s' came online", nodeName),
+		})
+	}
+
+	// Check for resource thresholds
+	go api.checkResourceThresholds(nodeID, nodeName, &systemInfo)
 
 	c.JSON(200, gin.H{"status": "ok"})
 }
@@ -586,6 +683,14 @@ func (api *API) createUser(c *gin.Context) {
 		return
 	}
 
+	// Trigger webhook event for user creation
+	go api.triggerWebhookEvent("user.created", map[string]interface{}{
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"role":      user.Role,
+		"message":   fmt.Sprintf("User '%s' with role '%s' has been created", user.Username, user.Role),
+	})
+
 	c.JSON(http.StatusCreated, user)
 }
 
@@ -697,6 +802,26 @@ func (api *API) startHeartbeatChecker() {
 
 	for range ticker.C {
 		threshold := time.Now().Add(-time.Duration(api.config.Heartbeat.TimeoutSeconds) * time.Second)
+		
+		// Get nodes that will be marked offline
+		rows, err := api.db.Query("SELECT id, name, status FROM nodes WHERE (last_seen < ? OR last_seen IS NULL) AND status = 'online'", threshold)
+		if err == nil {
+			for rows.Next() {
+				var nodeID, nodeName, status string
+				if rows.Scan(&nodeID, &nodeName, &status) == nil {
+					// Trigger webhook for status change
+					go api.triggerWebhookEvent("node.status.changed", map[string]interface{}{
+						"node_id":     nodeID,
+						"node_name":   nodeName,
+						"status":      "offline",
+						"old_status":  status,
+						"message":     fmt.Sprintf("Node '%s' went offline", nodeName),
+					})
+				}
+			}
+			rows.Close()
+		}
+		
 		api.db.Exec("UPDATE nodes SET status = 'offline' WHERE last_seen < ? OR last_seen IS NULL", threshold)
 	}
 }
@@ -1011,5 +1136,438 @@ func (api *API) rateLimitMiddleware() gin.HandlerFunc {
 		}
 		
 		c.Next()
+	}
+}
+
+// Webhook handlers
+func (api *API) getWebhooks(c *gin.Context) {
+	rows, err := api.db.Query("SELECT id, name, type, url, events, headers, secret, enabled, created_at, last_triggered, failure_count FROM webhooks ORDER BY created_at DESC")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch webhooks"})
+		return
+	}
+	defer rows.Close()
+
+	var webhooks []Webhook
+	for rows.Next() {
+		var webhook Webhook
+		err := rows.Scan(&webhook.ID, &webhook.Name, &webhook.Type, &webhook.URL, &webhook.Events, &webhook.Headers, &webhook.Secret, &webhook.Enabled, &webhook.CreatedAt, &webhook.LastTriggered, &webhook.FailureCount)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan webhook"})
+			return
+		}
+		webhooks = append(webhooks, webhook)
+	}
+
+	c.JSON(http.StatusOK, webhooks)
+}
+
+func (api *API) createWebhook(c *gin.Context) {
+	var req struct {
+		Name    string            `json:"name" binding:"required"`
+		Type    string            `json:"type" binding:"required"`
+		URL     string            `json:"url" binding:"required"`
+		Events  []string          `json:"events" binding:"required"`
+		Headers map[string]string `json:"headers"`
+		Secret  string            `json:"secret"`
+		Enabled bool              `json:"enabled"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate webhook type
+	if req.Type != "discord" && req.Type != "custom" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Type must be 'discord' or 'custom'"})
+		return
+	}
+
+	// Validate events
+	validEvents := map[string]bool{
+		"node.status.changed": true,
+		"node.created":        true,
+		"node.deleted":        true,
+		"node.metric.cpu":     true,
+		"node.metric.ram":     true,
+		"node.metric.disk":    true,
+		"user.created":        true,
+		"auth.failed":         true,
+	}
+	
+	for _, event := range req.Events {
+		if !validEvents[event] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid event type: %s", event)})
+			return
+		}
+	}
+
+	eventsJSON, _ := json.Marshal(req.Events)
+	headersJSON, _ := json.Marshal(req.Headers)
+
+	webhook := Webhook{
+		ID:        uuid.New().String(),
+		Name:      req.Name,
+		Type:      req.Type,
+		URL:       req.URL,
+		Events:    string(eventsJSON),
+		Headers:   string(headersJSON),
+		Secret:    req.Secret,
+		Enabled:   req.Enabled,
+		CreatedAt: time.Now(),
+	}
+
+	_, err := api.db.Exec(
+		"INSERT INTO webhooks (id, name, type, url, events, headers, secret, enabled, created_at, failure_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		webhook.ID, webhook.Name, webhook.Type, webhook.URL, webhook.Events, webhook.Headers, webhook.Secret, webhook.Enabled, webhook.CreatedAt, 0,
+	)
+	
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create webhook"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, webhook)
+}
+
+func (api *API) getWebhook(c *gin.Context) {
+	id := c.Param("id")
+	
+	var webhook Webhook
+	err := api.db.QueryRow(
+		"SELECT id, name, type, url, events, headers, secret, enabled, created_at, last_triggered, failure_count FROM webhooks WHERE id = ?",
+		id,
+	).Scan(&webhook.ID, &webhook.Name, &webhook.Type, &webhook.URL, &webhook.Events, &webhook.Headers, &webhook.Secret, &webhook.Enabled, &webhook.CreatedAt, &webhook.LastTriggered, &webhook.FailureCount)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Webhook not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get webhook"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, webhook)
+}
+
+func (api *API) updateWebhook(c *gin.Context) {
+	id := c.Param("id")
+	
+	var req struct {
+		Name    string            `json:"name" binding:"required"`
+		Type    string            `json:"type" binding:"required"`
+		URL     string            `json:"url" binding:"required"`
+		Events  []string          `json:"events" binding:"required"`
+		Headers map[string]string `json:"headers"`
+		Secret  string            `json:"secret"`
+		Enabled bool              `json:"enabled"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate webhook type
+	if req.Type != "discord" && req.Type != "custom" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Type must be 'discord' or 'custom'"})
+		return
+	}
+
+	eventsJSON, _ := json.Marshal(req.Events)
+	headersJSON, _ := json.Marshal(req.Headers)
+
+	result, err := api.db.Exec(
+		"UPDATE webhooks SET name = ?, type = ?, url = ?, events = ?, headers = ?, secret = ?, enabled = ? WHERE id = ?",
+		req.Name, req.Type, req.URL, string(eventsJSON), string(headersJSON), req.Secret, req.Enabled, id,
+	)
+	
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update webhook"})
+		return
+	}
+	
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Webhook not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Webhook updated successfully"})
+}
+
+func (api *API) deleteWebhook(c *gin.Context) {
+	id := c.Param("id")
+	
+	result, err := api.db.Exec("DELETE FROM webhooks WHERE id = ?", id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete webhook"})
+		return
+	}
+	
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Webhook not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Webhook deleted successfully"})
+}
+
+func (api *API) testWebhook(c *gin.Context) {
+	id := c.Param("id")
+	
+	var webhook Webhook
+	err := api.db.QueryRow(
+		"SELECT id, name, type, url, events, headers, secret, enabled FROM webhooks WHERE id = ?",
+		id,
+	).Scan(&webhook.ID, &webhook.Name, &webhook.Type, &webhook.URL, &webhook.Events, &webhook.Headers, &webhook.Secret, &webhook.Enabled)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Webhook not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get webhook"})
+		}
+		return
+	}
+
+	// Create test event
+	testEvent := WebhookEvent{
+		Type:      "webhook.test",
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"message": "This is a test webhook from Atlas Panel",
+			"webhook_id": webhook.ID,
+			"webhook_name": webhook.Name,
+		},
+	}
+
+	// Send the webhook
+	err = api.sendWebhook(&webhook, &testEvent)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to send test webhook: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Test webhook sent successfully"})
+}
+
+func (api *API) sendWebhook(webhook *Webhook, event *WebhookEvent) error {
+	if !webhook.Enabled {
+		return nil // Skip disabled webhooks
+	}
+
+	var payload interface{}
+	
+	if webhook.Type == "discord" {
+		// Format for Discord webhook
+		var color int
+		switch event.Type {
+		case "node.status.changed":
+			if status, ok := event.Data["status"].(string); ok && status == "online" {
+				color = 3066993 // Green
+			} else {
+				color = 15158332 // Red
+			}
+		case "node.created":
+			color = 3447003 // Blue
+		case "node.deleted":
+			color = 15158332 // Red
+		case "webhook.test":
+			color = 16776960 // Yellow
+		default:
+			color = 8421504 // Gray
+		}
+
+		title := event.Type
+		description := fmt.Sprintf("Event occurred at %s", event.Timestamp.Format("2006-01-02 15:04:05 UTC"))
+		
+		if message, ok := event.Data["message"].(string); ok {
+			description = message
+		}
+
+		payload = map[string]interface{}{
+			"embeds": []map[string]interface{}{
+				{
+					"title":       title,
+					"description": description,
+					"color":       color,
+					"timestamp":   event.Timestamp.Format(time.RFC3339),
+					"footer": map[string]interface{}{
+						"text": "Atlas Panel",
+					},
+					"fields": []map[string]interface{}{},
+				},
+			},
+		}
+
+		// Add fields based on event data
+		if embed, ok := payload.(map[string]interface{})["embeds"].([]map[string]interface{}); ok && len(embed) > 0 {
+			fields := embed[0]["fields"].([]map[string]interface{})
+			
+			for key, value := range event.Data {
+				if key != "message" {
+					fields = append(fields, map[string]interface{}{
+						"name":   strings.Title(strings.ReplaceAll(key, "_", " ")),
+						"value":  fmt.Sprintf("%v", value),
+						"inline": true,
+					})
+				}
+			}
+			embed[0]["fields"] = fields
+		}
+	} else {
+		// Custom webhook format
+		payload = event
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %v", err)
+	}
+
+	// Create HTTP request
+	req, err := http.NewRequest("POST", webhook.URL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Atlas-Panel-Webhook/1.0")
+
+	// Add custom headers
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(webhook.Headers), &headers); err == nil {
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+	}
+
+	// Add signature if secret is provided
+	if webhook.Secret != "" {
+		mac := hmac.New(sha256.New, []byte(webhook.Secret))
+		mac.Write(payloadBytes)
+		signature := hex.EncodeToString(mac.Sum(nil))
+		req.Header.Set("X-Atlas-Signature", "sha256="+signature)
+	}
+
+	// Send request with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		// Update failure count
+		api.db.Exec("UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?", webhook.ID)
+		return fmt.Errorf("failed to send webhook: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Update last triggered time
+	api.db.Exec("UPDATE webhooks SET last_triggered = ?, failure_count = 0 WHERE id = ?", time.Now(), webhook.ID)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Update failure count for non-2xx responses
+		api.db.Exec("UPDATE webhooks SET failure_count = failure_count + 1 WHERE id = ?", webhook.ID)
+		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (api *API) triggerWebhookEvent(eventType string, data map[string]interface{}) {
+	// Get all enabled webhooks that listen for this event type
+	rows, err := api.db.Query("SELECT id, name, type, url, events, headers, secret, enabled FROM webhooks WHERE enabled = true")
+	if err != nil {
+		log.Printf("Failed to fetch webhooks for event %s: %v", eventType, err)
+		return
+	}
+	defer rows.Close()
+
+	event := &WebhookEvent{
+		Type:      eventType,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	for rows.Next() {
+		var webhook Webhook
+		err := rows.Scan(&webhook.ID, &webhook.Name, &webhook.Type, &webhook.URL, &webhook.Events, &webhook.Headers, &webhook.Secret, &webhook.Enabled)
+		if err != nil {
+			log.Printf("Failed to scan webhook: %v", err)
+			continue
+		}
+
+		// Check if webhook listens for this event type
+		var events []string
+		if err := json.Unmarshal([]byte(webhook.Events), &events); err != nil {
+			log.Printf("Failed to unmarshal webhook events: %v", err)
+			continue
+		}
+
+		shouldTrigger := false
+		for _, e := range events {
+			if e == eventType {
+				shouldTrigger = true
+				break
+			}
+		}
+
+		if shouldTrigger {
+			go func(w Webhook) {
+				if err := api.sendWebhook(&w, event); err != nil {
+					log.Printf("Failed to send webhook %s (%s): %v", w.Name, w.ID, err)
+				}
+			}(webhook)
+		}
+	}
+}
+
+func (api *API) checkResourceThresholds(nodeID, nodeName string, systemInfo *SystemInfo) {
+	// Define thresholds (can be made configurable later)
+	const (
+		cpuThreshold  = 90.0  // 90%
+		ramThreshold  = 90.0  // 90%
+		diskThreshold = 90.0  // 90%
+	)
+
+	if systemInfo.CPUUsage > cpuThreshold {
+		api.triggerWebhookEvent("node.metric.cpu", map[string]interface{}{
+			"node_id":      nodeID,
+			"node_name":    nodeName,
+			"metric_type":  "cpu",
+			"current_value": systemInfo.CPUUsage,
+			"threshold":    cpuThreshold,
+			"message":      fmt.Sprintf("Node '%s' CPU usage is %.1f%% (threshold: %.1f%%)", nodeName, systemInfo.CPUUsage, cpuThreshold),
+		})
+	}
+
+	if systemInfo.RAMUsage > ramThreshold {
+		api.triggerWebhookEvent("node.metric.ram", map[string]interface{}{
+			"node_id":       nodeID,
+			"node_name":     nodeName,
+			"metric_type":   "ram",
+			"current_value": systemInfo.RAMUsage,
+			"threshold":     ramThreshold,
+			"ram_total":     systemInfo.RAMTotal,
+			"message":       fmt.Sprintf("Node '%s' RAM usage is %.1f%% (threshold: %.1f%%)", nodeName, systemInfo.RAMUsage, ramThreshold),
+		})
+	}
+
+	if systemInfo.DiskUsage > diskThreshold {
+		api.triggerWebhookEvent("node.metric.disk", map[string]interface{}{
+			"node_id":       nodeID,
+			"node_name":     nodeName,
+			"metric_type":   "disk",
+			"current_value": systemInfo.DiskUsage,
+			"threshold":     diskThreshold,
+			"disk_total":    systemInfo.DiskTotal,
+			"message":       fmt.Sprintf("Node '%s' disk usage is %.1f%% (threshold: %.1f%%)", nodeName, systemInfo.DiskUsage, diskThreshold),
+		})
 	}
 }

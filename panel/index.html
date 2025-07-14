@@ -16,16 +16,19 @@
         </div>
         <ul class="nav-menu">
           <li class="nav-item active" data-page="dashboard">
-            <span>Dashboard</span>
+            <span><i class="fas fa-chart-pie"></i> Dashboard</span>
           </li>
           <li class="nav-item" data-page="nodes">
-            <span>Nodes</span>
+            <span><i class="fas fa-server"></i> Nodes</span>
           </li>
           <li class="nav-item" data-page="users" data-admin-only>
-            <span>Users</span>
+            <span><i class="fas fa-users"></i> Users</span>
+          </li>
+          <li class="nav-item" data-page="webhooks" data-admin-only>
+            <span><i class="fas fa-link"></i> Webhooks</span>
           </li>
           <li class="nav-item" data-page="account">
-            <span>Account</span>
+            <span><i class="fas fa-user-cog"></i> Account</span>
           </li>
         </ul>
         <div class="sidebar-footer">
@@ -154,6 +157,27 @@
               </div>
               <div class="nodes-container">
                 <div id="users-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Webhooks Page -->
+          <div id="webhooks-page" class="page">
+            <div class="page-section">
+              <div class="section-header">
+                <div class="section-header-content">
+                  <h3>Webhook Management</h3>
+                  <p>Configure webhooks to receive notifications when events occur</p>
+                </div>
+                <div class="section-header-actions">
+                  <button onclick="panel.showWebhookForm()" class="create-webhook-btn">
+                    <i class="fas fa-plus"></i>
+                    Create Webhook
+                  </button>
+                </div>
+              </div>
+              <div class="webhooks-container">
+                <div id="webhooks-list"></div>
               </div>
             </div>
           </div>

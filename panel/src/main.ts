@@ -31,6 +31,20 @@ interface User {
   created_at: string
 }
 
+interface Webhook {
+  id: string
+  name: string
+  type: string
+  url: string
+  events: string
+  headers: string
+  secret?: string
+  enabled: boolean
+  created_at: string
+  last_triggered?: string
+  failure_count: number
+}
+
 interface AuthResponse {
   token: string
   user: User
@@ -422,6 +436,7 @@ class AtlasPanel {
       dashboard: 'Dashboard',
       nodes: 'Node Management',
       users: 'User Management',
+      webhooks: 'Webhook Management',
       account: 'Account Settings',
       login: 'Login'
     }
@@ -431,6 +446,8 @@ class AtlasPanel {
     // Load page-specific data
     if (page === 'users') {
       this.loadUsers()
+    } else if (page === 'webhooks') {
+      this.loadWebhooks()
     }
     
     // Don't change URL if we're showing the login page
@@ -711,6 +728,8 @@ class AtlasPanel {
       await this.showPage('users')
     } else if (path === '/account') {
       await this.showPage('account')
+    } else if (path === '/webhooks') {
+      await this.showPage('webhooks')
     } else if (path.startsWith('/node/')) {
       const nodeId = path.split('/').pop()!
       await this.showPage(`node-${nodeId}`)
@@ -914,6 +933,90 @@ class AtlasPanel {
     }
   }
 
+  async getWebhooks(): Promise<Webhook[]> {
+    const response = await fetch(`${this.apiUrl}/webhooks`, {
+      headers: this.getAuthHeaders(),
+    })
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.showLoginPage()
+        throw new Error('Authentication required')
+      }
+      throw new Error('Failed to fetch webhooks')
+    }
+    
+    return response.json()
+  }
+
+  async createWebhook(name: string, type: string, url: string, events: string[], headers: Record<string, string>, secret: string, enabled: boolean): Promise<Webhook> {
+    const response = await fetch(`${this.apiUrl}/webhooks`, {
+      method: 'POST',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ name, type, url, events, headers, secret, enabled }),
+    })
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.showLoginPage()
+        throw new Error('Authentication required')
+      }
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to create webhook')
+    }
+    
+    return response.json()
+  }
+
+  async updateWebhook(id: string, name: string, type: string, url: string, events: string[], headers: Record<string, string>, secret: string, enabled: boolean): Promise<void> {
+    const response = await fetch(`${this.apiUrl}/webhooks/${id}`, {
+      method: 'PUT',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ name, type, url, events, headers, secret, enabled }),
+    })
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.showLoginPage()
+        throw new Error('Authentication required')
+      }
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to update webhook')
+    }
+  }
+
+  async deleteWebhook(id: string): Promise<void> {
+    const response = await fetch(`${this.apiUrl}/webhooks/${id}`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders(),
+    })
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.showLoginPage()
+        throw new Error('Authentication required')
+      }
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to delete webhook')
+    }
+  }
+
+  async testWebhook(id: string): Promise<void> {
+    const response = await fetch(`${this.apiUrl}/webhooks/${id}/test`, {
+      method: 'POST',
+      headers: this.getAuthHeaders(),
+    })
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        this.showLoginPage()
+        throw new Error('Authentication required')
+      }
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to test webhook')
+    }
+  }
+
   renderUsers(users: User[]): void {
     const usersList = document.getElementById('users-list')!
     
@@ -1000,6 +1103,287 @@ class AtlasPanel {
         this.showLoginPage()
       }
     }
+  }
+
+  renderWebhooks(webhooks: Webhook[]): void {
+    const webhooksList = document.getElementById('webhooks-list')!
+    
+    if (webhooks.length === 0) {
+      webhooksList.innerHTML = '<div class="empty-state">No webhooks configured yet. Create one above.</div>'
+      return
+    }
+
+    webhooksList.innerHTML = `
+      <div class="webhooks-grid">
+        ${webhooks.map(webhook => {
+          const events = JSON.parse(webhook.events) as string[]
+          
+          let lastTriggered = 'Never'
+          if (webhook.last_triggered) {
+            try {
+              const date = new Date(webhook.last_triggered)
+              if (!isNaN(date.getTime())) {
+                lastTriggered = date.toLocaleString()
+              }
+            } catch (e) {
+              lastTriggered = 'Never'
+            }
+          }
+          
+          return `
+            <div class="webhook-card ${webhook.enabled ? 'enabled' : 'disabled'}">
+              <div class="webhook-card-header">
+                <div class="webhook-info">
+                  <div class="webhook-icon">
+                    <i class="${webhook.type === 'discord' ? 'fab fa-discord' : 'fas fa-link'}"></i>
+                  </div>
+                  <div class="webhook-details">
+                    <h4 class="webhook-name">${webhook.name}</h4>
+                    <div class="webhook-meta">
+                      <span class="webhook-type">${webhook.type === 'discord' ? 'Discord' : 'Custom'}</span>
+                      <span class="webhook-status ${webhook.enabled ? 'enabled' : 'disabled'}">
+                        ${webhook.enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div class="webhook-actions">
+                  <button class="test-btn" data-id="${webhook.id}" title="Test Webhook">
+                    <i class="fas fa-play"></i>
+                  </button>
+                  <button class="edit-btn" data-id="${webhook.id}" title="Edit Webhook">
+                    <i class="fas fa-edit"></i>
+                  </button>
+                  <button class="delete-btn" data-id="${webhook.id}" title="Delete Webhook">
+                    <i class="fas fa-trash"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="webhook-card-body">
+                <div class="webhook-events">
+                  <span class="label">Events:</span>
+                  <div class="events-list">
+                    ${events.map(event => `<span class="event-tag">${event}</span>`).join('')}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `
+        }).join('')}
+      </div>
+    `
+
+    // Add event listeners
+    webhooksList.querySelectorAll('.test-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault()
+        const id = (e.target as HTMLElement).closest('button')?.dataset.id!
+        try {
+          await this.testWebhook(id)
+          this.showToast('Test webhook sent successfully!', 'success')
+        } catch (error) {
+          this.showToast('Failed to send test webhook: ' + (error instanceof Error ? error.message : 'Unknown error'), 'error')
+        }
+      })
+    })
+
+    webhooksList.querySelectorAll('.edit-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault()
+        const id = (e.target as HTMLElement).closest('button')?.dataset.id!
+        const webhook = webhooks.find(w => w.id === id)
+        if (webhook) {
+          this.showWebhookForm(webhook)
+        }
+      })
+    })
+
+    webhooksList.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault()
+        const id = (e.target as HTMLElement).closest('button')?.dataset.id!
+        const webhook = webhooks.find(w => w.id === id)
+        if (webhook && confirm(`Are you sure you want to delete webhook "${webhook.name}"?`)) {
+          try {
+            await this.deleteWebhook(id)
+            this.loadWebhooks()
+            this.showToast('Webhook deleted successfully!', 'success')
+          } catch (error) {
+            console.error('Failed to delete webhook:', error)
+            this.showToast('Failed to delete webhook: ' + (error instanceof Error ? error.message : 'Unknown error'), 'error')
+          }
+        }
+      })
+    })
+  }
+
+  async loadWebhooks(): Promise<void> {
+    if (!this.checkAuth()) {
+      this.showLoginPage()
+      return
+    }
+    
+    try {
+      const webhooks = await this.getWebhooks()
+      this.renderWebhooks(webhooks)
+    } catch (error) {
+      console.error('Failed to load webhooks:', error)
+      if (error instanceof Error && error.message === 'Authentication required') {
+        this.showLoginPage()
+      }
+    }
+  }
+
+  showWebhookForm(webhook?: Webhook): void {
+    const isEdit = !!webhook
+    const events = webhook ? JSON.parse(webhook.events) as string[] : []
+    const headers = webhook ? JSON.parse(webhook.headers) as Record<string, string> : {}
+    
+    const modal = document.createElement('div')
+    modal.className = 'modal-overlay'
+    modal.innerHTML = `
+      <div class="modal-content webhook-modal">
+        <div class="modal-header">
+          <h3>${isEdit ? 'Edit' : 'Create'} Webhook</h3>
+          <button class="close-btn">&times;</button>
+        </div>
+        <form id="webhook-form" class="webhook-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="webhook-name">Name *</label>
+              <input type="text" id="webhook-name" value="${webhook?.name || ''}" required>
+            </div>
+            <div class="form-group">
+              <label for="webhook-type">Type *</label>
+              <select id="webhook-type" required>
+                <option value="custom" ${webhook?.type === 'custom' ? 'selected' : ''}>Custom</option>
+                <option value="discord" ${webhook?.type === 'discord' ? 'selected' : ''}>Discord</option>
+              </select>
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label for="webhook-url">Webhook URL *</label>
+            <input type="url" id="webhook-url" value="${webhook?.url || ''}" required>
+          </div>
+          
+          <div class="form-group">
+            <label>Events to Listen For *</label>
+            <div class="events-checkboxes">
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.status.changed" ${events.includes('node.status.changed') ? 'checked' : ''}>
+                Node Status Changed
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.created" ${events.includes('node.created') ? 'checked' : ''}>
+                Node Created
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.deleted" ${events.includes('node.deleted') ? 'checked' : ''}>
+                Node Deleted
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.metric.cpu" ${events.includes('node.metric.cpu') ? 'checked' : ''}>
+                CPU Threshold Exceeded
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.metric.ram" ${events.includes('node.metric.ram') ? 'checked' : ''}>
+                RAM Threshold Exceeded
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="node.metric.disk" ${events.includes('node.metric.disk') ? 'checked' : ''}>
+                Disk Threshold Exceeded
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" value="user.created" ${events.includes('user.created') ? 'checked' : ''}>
+                User Created
+              </label>
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label for="webhook-secret">Secret (Optional)</label>
+            <input type="text" id="webhook-secret" value="${webhook?.secret || ''}" placeholder="Used for request signature verification">
+          </div>
+          
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="webhook-enabled" ${webhook?.enabled !== false ? 'checked' : ''}>
+              Enable webhook
+            </label>
+          </div>
+          
+          <div class="form-actions">
+            <button type="button" class="cancel-btn">Cancel</button>
+            <button type="submit" class="submit-btn">${isEdit ? 'Update' : 'Create'} Webhook</button>
+          </div>
+        </form>
+      </div>
+    `
+    
+    document.body.appendChild(modal)
+    
+    // Event listeners
+    modal.querySelector('.close-btn')?.addEventListener('click', () => modal.remove())
+    modal.querySelector('.cancel-btn')?.addEventListener('click', () => modal.remove())
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.remove()
+    })
+    
+    const form = modal.querySelector('#webhook-form') as HTMLFormElement
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault()
+      
+      const nameInput = modal.querySelector('#webhook-name') as HTMLInputElement
+      const typeInput = modal.querySelector('#webhook-type') as HTMLSelectElement
+      const urlInput = modal.querySelector('#webhook-url') as HTMLInputElement
+      const secretInput = modal.querySelector('#webhook-secret') as HTMLInputElement
+      const enabledInput = modal.querySelector('#webhook-enabled') as HTMLInputElement
+      
+      const eventCheckboxes = modal.querySelectorAll('.events-checkboxes input[type="checkbox"]:checked') as NodeListOf<HTMLInputElement>
+      const selectedEvents = Array.from(eventCheckboxes).map(cb => cb.value)
+      
+      if (selectedEvents.length === 0) {
+        this.showToast('Please select at least one event to listen for.', 'warning')
+        return
+      }
+      
+      try {
+        if (isEdit && webhook) {
+          await this.updateWebhook(
+            webhook.id,
+            nameInput.value,
+            typeInput.value,
+            urlInput.value,
+            selectedEvents,
+            {},
+            secretInput.value,
+            enabledInput.checked
+          )
+        } else {
+          await this.createWebhook(
+            nameInput.value,
+            typeInput.value,
+            urlInput.value,
+            selectedEvents,
+            {},
+            secretInput.value,
+            enabledInput.checked
+          )
+        }
+        
+        modal.remove()
+        this.loadWebhooks()
+        this.showToast(`Webhook ${isEdit ? 'updated' : 'created'} successfully!`, 'success')
+      } catch (error) {
+        this.showToast('Failed to save webhook: ' + (error instanceof Error ? error.message : 'Unknown error'), 'error')
+      }
+    })
+    
+    // Focus name input
+    setTimeout(() => {
+      (modal.querySelector('#webhook-name') as HTMLInputElement)?.focus()
+    }, 100)
   }
 
   copyAccessKey(key: string, element: HTMLElement): void {
@@ -1252,6 +1636,63 @@ class AtlasPanel {
     if (terminalContainer) {
       terminalContainer.remove()
     }
+  }
+
+  showToast(message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration: number = 4000): void {
+    // Create toast container if it doesn't exist
+    let toastContainer = document.querySelector('.toast-container')
+    if (!toastContainer) {
+      toastContainer = document.createElement('div')
+      toastContainer.className = 'toast-container'
+      document.body.appendChild(toastContainer)
+    }
+
+    // Create toast element
+    const toast = document.createElement('div')
+    toast.className = `toast ${type}`
+    
+    const iconMap = {
+      success: 'fas fa-check',
+      error: 'fas fa-times',
+      warning: 'fas fa-exclamation',
+      info: 'fas fa-info'
+    }
+
+    toast.innerHTML = `
+      <div class="toast-icon">
+        <i class="${iconMap[type]}"></i>
+      </div>
+      <div class="toast-content">${message}</div>
+      <button class="toast-close">
+        <i class="fas fa-times"></i>
+      </button>
+    `
+
+    // Add close functionality
+    const closeBtn = toast.querySelector('.toast-close')
+    closeBtn?.addEventListener('click', () => {
+      this.removeToast(toast)
+    })
+
+    // Add to container
+    toastContainer.appendChild(toast)
+
+    // Show with animation
+    setTimeout(() => {
+      toast.classList.add('show')
+    }, 100)
+
+    // Auto remove after duration
+    setTimeout(() => {
+      this.removeToast(toast)
+    }, duration)
+  }
+
+  removeToast(toast: Element): void {
+    toast.classList.remove('show')
+    setTimeout(() => {
+      toast.remove()
+    }, 300)
   }
 }
 
