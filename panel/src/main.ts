@@ -61,6 +61,7 @@ class AtlasPanel {
   private currentUser: User | null = null
   private currentTerminal: NodeTerminal | SimpleTerminal | null = null
   private useSimpleTerminal = true // Use simple terminal by default
+  private currentTheme: 'light' | 'dark' = 'light'
 
   private getAuthHeaders(): HeadersInit {
     const headers: HeadersInit = {
@@ -744,6 +745,8 @@ class AtlasPanel {
   }
 
   init(): void {
+    this.initializeTheme()
+    this.setupThemeToggle()
     this.handleNavigation()
     this.updateSidebar()
     this.setupFormListeners()
@@ -1118,18 +1121,6 @@ class AtlasPanel {
         ${webhooks.map(webhook => {
           const events = JSON.parse(webhook.events) as string[]
           
-          let lastTriggered = 'Never'
-          if (webhook.last_triggered) {
-            try {
-              const date = new Date(webhook.last_triggered)
-              if (!isNaN(date.getTime())) {
-                lastTriggered = date.toLocaleString()
-              }
-            } catch (e) {
-              lastTriggered = 'Never'
-            }
-          }
-          
           return `
             <div class="webhook-card ${webhook.enabled ? 'enabled' : 'disabled'}">
               <div class="webhook-card-header">
@@ -1237,7 +1228,6 @@ class AtlasPanel {
   showWebhookForm(webhook?: Webhook): void {
     const isEdit = !!webhook
     const events = webhook ? JSON.parse(webhook.events) as string[] : []
-    const headers = webhook ? JSON.parse(webhook.headers) as Record<string, string> : {}
     
     const modal = document.createElement('div')
     modal.className = 'modal-overlay'
@@ -1417,6 +1407,9 @@ class AtlasPanel {
   }
 
   createLoginPage(): void {
+    // Initialize theme for login page
+    this.initializeTheme()
+    
     // Create a standalone login page that replaces the entire app
     const app = document.getElementById('app')!
     const loginPage = document.createElement('div')
@@ -1693,6 +1686,63 @@ class AtlasPanel {
     setTimeout(() => {
       toast.remove()
     }, 300)
+  }
+
+  initializeTheme(): void {
+    // Load theme from localStorage or default to light
+    const savedTheme = localStorage.getItem('atlas_theme') as 'light' | 'dark' | null
+    this.currentTheme = savedTheme || 'light'
+    
+    // Apply theme to document
+    this.applyTheme(this.currentTheme)
+    
+    // Update toggle button
+    this.updateThemeToggle()
+  }
+
+  applyTheme(theme: 'light' | 'dark'): void {
+    if (theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark')
+    } else {
+      document.documentElement.removeAttribute('data-theme')
+    }
+    this.currentTheme = theme
+  }
+
+  toggleTheme(): void {
+    const newTheme = this.currentTheme === 'light' ? 'dark' : 'light'
+    this.applyTheme(newTheme)
+    this.updateThemeToggle()
+    
+    // Save to localStorage
+    localStorage.setItem('atlas_theme', newTheme)
+    
+    // Show toast notification
+    this.showToast(`Switched to ${newTheme} mode`, 'info', 2000)
+  }
+
+  updateThemeToggle(): void {
+    const themeToggle = document.getElementById('theme-toggle')
+    const icon = themeToggle?.querySelector('i')
+    
+    if (icon) {
+      if (this.currentTheme === 'dark') {
+        icon.className = 'fas fa-sun'
+        themeToggle!.title = 'Switch to light mode'
+      } else {
+        icon.className = 'fas fa-moon'
+        themeToggle!.title = 'Switch to dark mode'
+      }
+    }
+  }
+
+  setupThemeToggle(): void {
+    const themeToggle = document.getElementById('theme-toggle')
+    if (themeToggle) {
+      themeToggle.addEventListener('click', () => {
+        this.toggleTheme()
+      })
+    }
   }
 }
 
