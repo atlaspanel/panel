@@ -65,6 +65,10 @@ interface MeResponse {
   user: User
 }
 
+interface Config {
+  apiUrl: string
+}
+
 class AtlasPanel {
   private apiUrl = 'http://localhost:8080'
   private authToken: string | null = null
@@ -73,6 +77,24 @@ class AtlasPanel {
   private useSimpleTerminal = false // Use xterm.js terminal by default
   private currentTheme: 'light' | 'dark' = 'light'
   private previousNodeTab: string = 'overview'
+
+  constructor() {
+    // Config will be loaded when init() is called
+  }
+
+  private async loadConfig(): Promise<void> {
+    try {
+      const response = await fetch('/config.json')
+      if (response.ok) {
+        const config: Config = await response.json()
+        this.apiUrl = config.apiUrl
+      } else {
+        console.warn('Could not load config.json, using default API URL')
+      }
+    } catch (error) {
+      console.warn('Could not load config.json, using default API URL:', error)
+    }
+  }
 
   private getAuthHeaders(): HeadersInit {
     const headers: HeadersInit = {
@@ -1381,7 +1403,9 @@ class AtlasPanel {
     }
   }
 
-  init(): void {
+  async init(): Promise<void> {
+    await this.loadConfig()
+    
     this.initializeTheme()
     this.setupThemeToggle()
     this.handleNavigation()
