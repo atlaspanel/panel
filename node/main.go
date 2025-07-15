@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,15 +32,25 @@ type Config struct {
 	Key         string `json:"key"`
 }
 
+type Package struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Size        int64  `json:"size"`
+}
+
 type SystemInfo struct {
-	OS          string  `json:"os"`
-	Arch        string  `json:"arch"`
-	CPUUsage    float64 `json:"cpu_usage"`
-	RAMUsage    float64 `json:"ram_usage"`
-	RAMTotal    uint64  `json:"ram_total"`
-	DiskUsage   float64 `json:"disk_usage"`
-	DiskTotal   uint64  `json:"disk_total"`
-	Uptime      uint64  `json:"uptime"`
+	OS           string    `json:"os"`
+	Arch         string    `json:"arch"`
+	CPUUsage     float64   `json:"cpu_usage"`
+	RAMUsage     float64   `json:"ram_usage"`
+	RAMTotal     uint64    `json:"ram_total"`
+	DiskUsage    float64   `json:"disk_usage"`
+	DiskTotal    uint64    `json:"disk_total"`
+	Uptime       uint64    `json:"uptime"`
+	Packages     []Package `json:"packages,omitempty"`
+	PackageCount int       `json:"package_count"`
 }
 
 type ShellSession struct {
@@ -188,6 +200,57 @@ func (a *Agent) getNodeURL() string {
 	return "http://localhost:3040"
 }
 
+func (a *Agent) getPackageInfo() ([]Package, error) {
+	if runtime.GOOS != "linux" {
+		return nil, nil // Skip non-Linux systems
+	}
+
+	// Check if dpkg is available
+	if _, err := exec.LookPath("dpkg-query"); err != nil {
+		return nil, nil // dpkg not available, skip package info
+	}
+
+	cmd := exec.Command("dpkg-query", "-W", "-f=${Package}\t${Version}\t${installed-Size}\t${Status}\t${Description}\n")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var packages []Package
+	lines := strings.Split(string(output), "\n")
+	
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		
+		parts := strings.Split(line, "\t")
+		if len(parts) < 5 {
+			continue
+		}
+		
+		// Only include installed packages
+		if !strings.Contains(parts[3], "install ok installed") {
+			continue
+		}
+		
+		// Parse size (in KB)
+		size, _ := strconv.ParseInt(parts[2], 10, 64)
+		
+		pkg := Package{
+			Name:        parts[0],
+			Version:     parts[1],
+			Size:        size * 1024, // Convert KB to bytes
+			Status:      parts[3],
+			Description: parts[4],
+		}
+		
+		packages = append(packages, pkg)
+	}
+	
+	return packages, nil
+}
+
 func (a *Agent) getSystemInfo() (SystemInfo, error) {
 	var sysInfo SystemInfo
 
@@ -227,6 +290,15 @@ func (a *Agent) getSystemInfo() (SystemInfo, error) {
 	}
 	sysInfo.DiskUsage = diskInfo.UsedPercent
 	sysInfo.DiskTotal = diskInfo.Total
+
+	// Get package info (Linux only)
+	packages, err := a.getPackageInfo()
+	if err != nil {
+		log.Printf("Warning: Failed to get package info: %v", err)
+		// Don't fail the entire system info collection if package info fails
+	}
+	sysInfo.Packages = packages
+	sysInfo.PackageCount = len(packages)
 
 	return sysInfo, nil
 }

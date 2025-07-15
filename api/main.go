@@ -37,15 +37,25 @@ type Node struct {
 	SystemInfo  string    `json:"system_info" db:"system_info"`
 }
 
+type Package struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Size        int64  `json:"size"`
+}
+
 type SystemInfo struct {
-	OS          string  `json:"os"`
-	Arch        string  `json:"arch"`
-	CPUUsage    float64 `json:"cpu_usage"`
-	RAMUsage    float64 `json:"ram_usage"`
-	RAMTotal    uint64  `json:"ram_total"`
-	DiskUsage   float64 `json:"disk_usage"`
-	DiskTotal   uint64  `json:"disk_total"`
-	Uptime      uint64  `json:"uptime"`
+	OS           string    `json:"os"`
+	Arch         string    `json:"arch"`
+	CPUUsage     float64   `json:"cpu_usage"`
+	RAMUsage     float64   `json:"ram_usage"`
+	RAMTotal     uint64    `json:"ram_total"`
+	DiskUsage    float64   `json:"disk_usage"`
+	DiskTotal    uint64    `json:"disk_total"`
+	Uptime       uint64    `json:"uptime"`
+	Packages     []Package `json:"packages,omitempty"`
+	PackageCount int       `json:"package_count"`
 }
 
 type User struct {
