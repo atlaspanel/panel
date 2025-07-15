@@ -2147,6 +2147,89 @@ button:active {
   background: var(--primary-green-dark);
 }
 
+/* Services Dropdown Styles */
+.services-dropdown {
+  position: static;
+}
+
+.dropdown-toggle {
+  justify-content: space-between;
+}
+
+.dropdown-arrow {
+  font-size: 10px;
+  transition: transform 0.2s ease;
+  margin-left: auto;
+}
+
+.dropdown-toggle.active .dropdown-arrow {
+  transform: rotate(180deg);
+}
+
+.dropdown-menu {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  list-style: none;
+  margin: 8px 12px;
+  padding: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  display: none;
+}
+
+.dropdown-menu.show {
+  display: block;
+}
+
+.dropdown-menu li {
+  margin: 0;
+}
+
+.dropdown-menu button {
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dropdown-menu button:hover {
+  background: var(--primary-green-pale);
+  color: var(--text-primary);
+  transform: none;
+}
+
+.dropdown-menu button i {
+  font-size: 14px;
+}
+
+/* Coming Soon Content */
+.coming-soon-content {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.coming-soon-content h3 {
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+  font-size: 24px;
+}
+
+.coming-soon-content p {
+  color: var(--text-secondary);
+  margin: 0;
+  font-size: 16px;
+}
+
 .node-sidebar-nav button i {
   width: 16px;
   text-align: center;

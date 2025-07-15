@@ -550,6 +550,21 @@ class AtlasPanel {
               </button>
             </li>
             ` : ''}
+            <li class="services-dropdown">
+              <button class="dropdown-toggle" data-dropdown="services">
+                <i class="fas fa-cog"></i>
+                Services
+                <i class="fas fa-chevron-down dropdown-arrow"></i>
+              </button>
+              <ul class="dropdown-menu" id="services-dropdown-menu">
+                <li>
+                  <button data-service="nginx">
+                    <i class="fas fa-server"></i>
+                    Nginx
+                  </button>
+                </li>
+              </ul>
+            </li>
           </ul>
         </div>
 
@@ -630,12 +645,21 @@ class AtlasPanel {
   }
 
   setupNodeSidebarNavigation(content: Element): void {
-    const sidebarButtons = content.querySelectorAll('.node-sidebar-nav button')
+    const sidebarButtons = content.querySelectorAll('.node-sidebar-nav button:not(.dropdown-toggle)')
+    const dropdownToggle = content.querySelector('.dropdown-toggle') as HTMLElement
+    const dropdownMenu = content.querySelector('.dropdown-menu') as HTMLElement
+    const serviceButtons = content.querySelectorAll('[data-service]')
     
+    // Handle regular sidebar buttons
     sidebarButtons.forEach(button => {
       button.addEventListener('click', (e) => {
-        const clickedButton = e.target as HTMLElement
+        const clickedButton = e.currentTarget as HTMLElement
         const tab = clickedButton.dataset.tab
+        
+        // Don't process if clicking inside dropdown
+        if (dropdownMenu.contains(e.target as HTMLElement)) {
+          return
+        }
         
         // Remove active class from all buttons
         sidebarButtons.forEach(btn => btn.classList.remove('active'))
@@ -643,8 +667,46 @@ class AtlasPanel {
         // Add active class to clicked button
         clickedButton.classList.add('active')
         
-        // Handle tab switching (placeholder for now)
+        // Close dropdown when navigating to different tab
+        dropdownMenu.classList.remove('show')
+        dropdownToggle.classList.remove('active')
+        
+        // Handle tab switching
         this.handleNodeTabSwitch(tab || 'overview')
+      })
+    })
+    
+    // Handle dropdown toggle
+    if (dropdownToggle) {
+      dropdownToggle.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        
+        // Toggle dropdown
+        dropdownMenu.classList.toggle('show')
+        dropdownToggle.classList.toggle('active')
+      })
+    }
+    
+    // Handle service buttons
+    serviceButtons.forEach(button => {
+      button.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        const service = (e.currentTarget as HTMLElement).dataset.service
+        
+        // Remove active class from all sidebar buttons
+        sidebarButtons.forEach(btn => btn.classList.remove('active'))
+        
+        // Keep the dropdown toggle active to show something is selected
+        dropdownToggle.classList.add('active')
+        
+        // Handle service action
+        if (service === 'nginx') {
+          // Set a flag to prevent other tabs from overriding
+          (window as any).currentNodeView = 'service-nginx'
+          this.showServiceComingSoon('Nginx')
+        }
       })
     })
   }
@@ -688,6 +750,11 @@ class AtlasPanel {
   }
 
   showOverviewContent(): void {
+    // Don't override if showing a service page
+    if ((window as any).currentNodeView?.startsWith('service-')) {
+      return
+    }
+    
     const nodeMainContent = document.querySelector('.node-main-content')
     if (!nodeMainContent) return
 
@@ -1025,6 +1092,24 @@ class AtlasPanel {
     // Initial render
     renderPackages(filteredPackages, currentPage, packagesPerPage)
     renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+  }
+
+  showServiceComingSoon(serviceName: string): void {
+    const nodeMainContent = document.querySelector('.node-main-content')
+    if (!nodeMainContent) return
+
+    nodeMainContent.innerHTML = `
+      <div class="node-details-grid">
+        <div class="detail-card">
+          <h4>${serviceName} Service</h4>
+          <div class="coming-soon-content">
+            <i class="fas fa-server" style="font-size: 48px; color: var(--primary-green); margin-bottom: 16px;"></i>
+            <h3>Coming Soon</h3>
+            <p>This service management feature is currently under development.</p>
+          </div>
+        </div>
+      </div>
+    `
   }
 
   async updatePackage(packageName: string, command: string): Promise<void> {
