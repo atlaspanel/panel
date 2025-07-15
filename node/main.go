@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -44,13 +44,15 @@ type SystemInfo struct {
 type ShellSession struct {
 	conn    *websocket.Conn
 	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  io.ReadCloser
+	ptmx    *os.File // PTY master for Unix
+	stdin   io.WriteCloser // For Windows fallback
+	stdout  io.ReadCloser // For Windows fallback
+	stderr  io.ReadCloser // For Windows fallback
 	cleanup chan bool
 	mutex   sync.Mutex
 	ctx     context.Context
 	cancel  context.CancelFunc
+	isWindows bool
 }
 
 type Agent struct {
@@ -298,28 +300,75 @@ func (a *Agent) handleShellConnection(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 	// Determine shell command based on OS
 	var shellCmd string
-	var shellArgs []string
 	
 	switch runtime.GOOS {
 	case "windows":
-		shellCmd = "cmd"
-		shellArgs = []string{"/C", "cmd"}
+		// Windows doesn't support PTY, fall back to regular pipes
+		return a.createWindowsShellSession(conn)
 	default:
-		// Use script command to create a pseudo-terminal
-		// This prevents the shell from being stopped when running in background
-		shellCmd = "script"
-		shellArgs = []string{"-q", "-c", "/bin/bash", "/dev/null"}
-		
-		// Fallback to bash if script is not available
-		if _, err := exec.LookPath("script"); err != nil {
-			shellCmd = "/bin/bash"
-			shellArgs = []string{}
+		// Use proper shell for Unix-like systems
+		shellCmd = "/bin/bash"
+		if _, err := exec.LookPath(shellCmd); err != nil {
+			shellCmd = "/bin/sh"
 		}
 	}
 
-	cmd := exec.Command(shellCmd, shellArgs...)
+	// Create command
+	cmd := exec.Command(shellCmd)
 	
-	// Set up environment
+	// Set up environment for proper terminal behavior
+	cmd.Env = append(os.Environ(), 
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=en_US.UTF-8",
+	)
+	
+	// Start the command with PTY
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("Failed to start shell with PTY: %v", err)
+		return nil
+	}
+
+	// Set initial terminal size
+	if err := pty.Setsize(ptmx, &pty.Winsize{
+		Rows: 24,
+		Cols: 80,
+	}); err != nil {
+		log.Printf("Failed to set PTY size: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &ShellSession{
+		conn:    conn,
+		cmd:     cmd,
+		ptmx:    ptmx,
+		cleanup: make(chan bool, 1),
+		ctx:     ctx,
+		cancel:  cancel,
+		isWindows: false,
+	}
+
+	// Store session for management
+	sessionID := fmt.Sprintf("%p", session)
+	a.sessionMu.Lock()
+	a.sessions[sessionID] = session
+	a.sessionMu.Unlock()
+
+	// Set up cleanup when session ends
+	go func() {
+		<-session.cleanup
+		a.sessionMu.Lock()
+		delete(a.sessions, sessionID)
+		a.sessionMu.Unlock()
+	}()
+
+	return session
+}
+
+// Windows-specific shell session without PTY
+func (a *Agent) createWindowsShellSession(conn *websocket.Conn) *ShellSession {
+	cmd := exec.Command("cmd")
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	
 	// Create pipes for stdin, stdout, stderr
@@ -355,14 +404,15 @@ func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &ShellSession{
-		conn:    conn,
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		cleanup: make(chan bool, 1),
-		ctx:     ctx,
-		cancel:  cancel,
+		conn:      conn,
+		cmd:       cmd,
+		stdin:     stdin,
+		stdout:    stdout,
+		stderr:    stderr,
+		cleanup:   make(chan bool, 1),
+		ctx:       ctx,
+		cancel:    cancel,
+		isWindows: true,
 	}
 
 	// Store session for management
@@ -387,72 +437,106 @@ func (a *Agent) handleShellSession(session *ShellSession) {
 		session.cancel()
 		session.cleanup <- true
 		session.conn.Close()
-		session.stdin.Close()
+		if session.ptmx != nil {
+			session.ptmx.Close()
+		}
+		if session.stdin != nil {
+			session.stdin.Close()
+		}
 		if session.cmd.Process != nil {
 			session.cmd.Process.Kill()
 		}
 		log.Printf("Shell session ended")
 	}()
 
-	// Goroutine to read from stdout and send to websocket
+	// Goroutine to read from stdout/PTY and send to websocket
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("Stdout goroutine panic recovered: %v", r)
+				log.Printf("Output goroutine panic recovered: %v", r)
 			}
 		}()
 		
-		scanner := bufio.NewScanner(session.stdout)
-		for scanner.Scan() {
+		// Use raw byte reading instead of line scanning to preserve terminal control sequences
+		buffer := make([]byte, 4096)
+		var reader io.Reader
+		if session.ptmx != nil {
+			reader = session.ptmx
+		} else {
+			reader = session.stdout
+		}
+		
+		for {
 			select {
 			case <-session.ctx.Done():
-				log.Printf("Stdout goroutine cancelled")
+				log.Printf("Output goroutine cancelled")
 				return
 			default:
 			}
 			
-			output := scanner.Text() + "\n"
-			session.mutex.Lock()
-			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
-			session.mutex.Unlock()
+			n, err := reader.Read(buffer)
 			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("Stdout websocket connection closed: %v", err)
+				if err != io.EOF {
+					log.Printf("Error reading output: %v", err)
 				}
 				return
+			}
+			
+			if n > 0 {
+				session.mutex.Lock()
+				err := session.conn.WriteMessage(websocket.BinaryMessage, buffer[:n])
+				session.mutex.Unlock()
+				if err != nil {
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+						log.Printf("Output websocket connection closed: %v", err)
+					}
+					return
+				}
 			}
 		}
 	}()
 
-	// Goroutine to read from stderr and send to websocket
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Stderr goroutine panic recovered: %v", r)
+	// Goroutine to read from stderr and send to websocket (only for non-PTY sessions)
+	if session.stderr != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Stderr goroutine panic recovered: %v", r)
+				}
+			}()
+			
+			// Use raw byte reading for stderr as well
+			buffer := make([]byte, 4096)
+			for {
+				select {
+				case <-session.ctx.Done():
+					log.Printf("Stderr goroutine cancelled")
+					return
+				default:
+				}
+				
+				n, err := session.stderr.Read(buffer)
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("Error reading from stderr: %v", err)
+					}
+					return
+				}
+				
+				if n > 0 {
+					session.mutex.Lock()
+					err := session.conn.WriteMessage(websocket.BinaryMessage, buffer[:n])
+					session.mutex.Unlock()
+					if err != nil {
+						if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+							log.Printf("Stderr websocket connection closed: %v", err)
+						}
+						return
+					}
+				}
 			}
 		}()
-		
-		scanner := bufio.NewScanner(session.stderr)
-		for scanner.Scan() {
-			select {
-			case <-session.ctx.Done():
-				log.Printf("Stderr goroutine cancelled")
-				return
-			default:
-			}
-			
-			output := scanner.Text() + "\n"
-			session.mutex.Lock()
-			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
-			session.mutex.Unlock()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("Stderr websocket connection closed: %v", err)
-				}
-				return
-			}
-		}
-	}()
+	}
 
 	// Read from websocket and write to stdin
 	for {
@@ -473,10 +557,17 @@ func (a *Agent) handleShellSession(session *ShellSession) {
 			break
 		}
 
-		// Write input to shell stdin
-		_, err = session.stdin.Write(message)
+		// Write input to PTY or stdin
+		var writer io.Writer
+		if session.ptmx != nil {
+			writer = session.ptmx
+		} else {
+			writer = session.stdin
+		}
+		
+		_, err = writer.Write(message)
 		if err != nil {
-			log.Printf("Failed to write to shell stdin: %v", err)
+			log.Printf("Failed to write to shell: %v", err)
 			break
 		}
 	}

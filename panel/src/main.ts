@@ -60,7 +60,7 @@ class AtlasPanel {
   private authToken: string | null = null
   private currentUser: User | null = null
   private currentTerminal: NodeTerminal | SimpleTerminal | null = null
-  private useSimpleTerminal = true // Use simple terminal by default
+  private useSimpleTerminal = false // Use xterm.js terminal by default
   private currentTheme: 'light' | 'dark' = 'light'
   private previousNodeTab: string = 'overview'
 
@@ -643,7 +643,7 @@ class AtlasPanel {
         break
       case 'terminal':
         // Save the current tab before opening terminal
-        const currentActive = document.querySelector('.node-sidebar-nav button.active')
+        const currentActive = document.querySelector('.node-sidebar-nav button.active') as HTMLElement
         if (currentActive && currentActive.dataset.tab !== 'terminal') {
           this.previousNodeTab = currentActive.dataset.tab || 'overview'
         }

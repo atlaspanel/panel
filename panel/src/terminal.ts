@@ -103,7 +103,15 @@ export class NodeTerminal {
       }
 
       this.websocket.onmessage = (event) => {
-        this.terminal.write(event.data)
+        // Handle both text and binary messages
+        if (typeof event.data === 'string') {
+          this.terminal.write(event.data)
+        } else if (event.data instanceof Blob) {
+          // Convert binary data to text
+          event.data.text().then((text) => {
+            this.terminal.write(text)
+          })
+        }
       }
 
       this.websocket.onclose = (event) => {
