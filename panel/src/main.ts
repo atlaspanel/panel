@@ -13,6 +13,14 @@ interface Node {
   system_info: string
 }
 
+interface Package {
+  name: string
+  version: string
+  description: string
+  status: string
+  size: number
+}
+
 interface SystemInfo {
   os: string
   arch: string
@@ -22,6 +30,8 @@ interface SystemInfo {
   disk_usage: number
   disk_total: number
   uptime: number
+  packages?: Package[]
+  package_count: number
 }
 
 interface User {
@@ -526,6 +536,12 @@ class AtlasPanel {
                 Overview
               </button>
             </li>
+            <li>
+              <button data-tab="packages">
+                <i class="fas fa-cube"></i>
+                Packages
+              </button>
+            </li>
             ${isAdmin && node.status === 'online' ? `
             <li>
               <button data-tab="terminal">
@@ -638,7 +654,13 @@ class AtlasPanel {
     
     switch (tab) {
       case 'overview':
-        // Overview content is already displayed
+        // Show overview content
+        this.showOverviewContent()
+        this.previousNodeTab = tab
+        break
+      case 'packages':
+        // Show packages content
+        this.showPackagesContent()
         this.previousNodeTab = tab
         break
       case 'terminal':
@@ -663,6 +685,336 @@ class AtlasPanel {
       default:
         console.warn('Unknown tab:', tab)
     }
+  }
+
+  showOverviewContent(): void {
+    const nodeMainContent = document.querySelector('.node-main-content')
+    if (!nodeMainContent) return
+
+    // Get current node from URL
+    const nodeId = window.location.pathname.split('/').pop()
+    if (!nodeId) return
+
+    // Find the node data
+    this.getNodes().then(nodes => {
+      const node = nodes.find(n => n.id === nodeId)
+      if (!node) return
+
+      // Render the overview content
+      const overviewContent = `
+        <div class="node-details-grid">
+          <div class="detail-card">
+            <h4>Connection Details</h4>
+            <div class="detail-row">
+              <span class="label">URL:</span>
+              <span class="value">${node.url}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Status:</span>
+              <span class="value status ${node.status}">${node.status}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Last Seen:</span>
+              <span class="value">${this.formatLastSeen(node.last_seen)}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Created:</span>
+              <span class="value">${new Date(node.created_at).toLocaleString()}</span>
+            </div>
+          </div>
+
+          ${this.renderSystemInfoCard(node.system_info, node.status)}
+
+          <div class="detail-card">
+            <h4>Authentication</h4>
+            <div class="detail-row">
+              <span class="label">Node ID:</span>
+              <span class="value mono">${node.id}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Access Key:</span>
+              <span class="value mono key-hidden" title="Hover to reveal key, click to copy" onclick="panel.copyAccessKey('${node.key}', this)">
+                <div class="copy-notification">Copied!</div>
+                <span class="key-value">${node.key}</span>
+                <span class="key-placeholder">••••••••••••••••••••••••••••••••••••</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="detail-card">
+            <h4>Configuration</h4>
+            <div class="config-section">
+              <div class="config-header">
+                <h5>Node Agent Config</h5>
+                <button class="copy-btn" onclick="panel.copyConfig('${node.key}')">
+                  <i class="fas fa-copy"></i>
+                </button>
+              </div>
+              <div class="config-block">
+                <pre><code id="config-json"><span class="json-brace">{</span>
+  <span class="json-key">"api_endpoint"</span><span class="json-colon">:</span> <span class="json-string">"${window.location.origin.replace('5173', '8080')}"</span><span class="json-comma">,</span>
+  <span class="json-key">"key"</span><span class="json-colon">:</span> <span class="json-string">"${node.key}"</span>
+<span class="json-brace">}</span></code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      `
+
+      nodeMainContent.innerHTML = overviewContent
+    })
+  }
+
+  showPackagesContent(): void {
+    const nodeMainContent = document.querySelector('.node-main-content')
+    if (!nodeMainContent) return
+
+    // Get current node from URL
+    const nodeId = window.location.pathname.split('/').pop()
+    if (!nodeId) return
+
+    // Find the node data
+    this.getNodes().then(nodes => {
+      const node = nodes.find(n => n.id === nodeId)
+      if (!node) return
+
+      const sysInfo = this.parseSystemInfo(node.system_info)
+      const isOffline = node.status === 'offline'
+
+      let packagesContent = ''
+      
+      if (isOffline) {
+        packagesContent = `
+          <div class="packages-container">
+            <div class="packages-header">
+              <h3>Installed Packages</h3>
+              <p>Node is offline - package information unavailable</p>
+            </div>
+            <div class="empty-state">
+              <i class="fas fa-server"></i>
+              <p>Node must be online to view package information</p>
+            </div>
+          </div>
+        `
+      } else if (!sysInfo || !sysInfo.packages || sysInfo.packages.length === 0) {
+        packagesContent = `
+          <div class="packages-container">
+            <div class="packages-header">
+              <h3>Installed Packages</h3>
+              <p>Total packages: ${sysInfo?.package_count || 0}</p>
+            </div>
+            <div class="empty-state">
+              <i class="fas fa-cube"></i>
+              <p>No detailed package information available</p>
+              <small>Package details may not be supported on this system</small>
+            </div>
+          </div>
+        `
+      } else {
+        // Sort packages by name
+        const sortedPackages = [...sysInfo.packages].sort((a, b) => a.name.localeCompare(b.name))
+        
+        packagesContent = `
+          <div class="packages-container">
+            <div class="packages-header">
+              <h3>Installed Packages</h3>
+              <div class="packages-info">
+                <p>Total packages: ${sysInfo.package_count || sortedPackages.length}</p>
+                <div class="packages-controls">
+                  <div class="packages-sort">
+                    <label for="packages-sort">Sort by:</label>
+                    <select id="packages-sort">
+                      <option value="name">Name (A-Z)</option>
+                      <option value="size">Size (Largest)</option>
+                      <option value="size-asc">Size (Smallest)</option>
+                    </select>
+                  </div>
+                  <div class="packages-per-page">
+                    <label for="packages-per-page">Show:</label>
+                    <select id="packages-per-page">
+                      <option value="20">20 per page</option>
+                      <option value="50">50 per page</option>
+                      <option value="100">100 per page</option>
+                      <option value="all">All packages</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <input type="text" id="package-search" class="packages-search" placeholder="Search packages..." />
+            <div class="packages-grid" id="packages-grid">
+              <!-- Packages will be populated here -->
+            </div>
+            <div class="packages-pagination" id="packages-pagination">
+              <!-- Pagination will be populated here -->
+            </div>
+          </div>
+        `
+      }
+
+      nodeMainContent.innerHTML = packagesContent
+
+      // Add search functionality and pagination if packages are available
+      if (sysInfo?.packages && sysInfo.packages.length > 0) {
+        this.setupPackagesPagination(sysInfo.packages)
+      }
+    })
+  }
+
+  private setupPackagesPagination(packages: Package[]): void {
+    let sortedPackages = [...packages].sort((a, b) => a.name.localeCompare(b.name))
+    let filteredPackages = sortedPackages
+    let currentPage = 1
+    let packagesPerPage = 20
+    let currentSort = 'name'
+
+    const searchInput = document.getElementById('package-search') as HTMLInputElement
+    const packagesGrid = document.getElementById('packages-grid') as HTMLElement
+    const pagination = document.getElementById('packages-pagination') as HTMLElement
+    const perPageSelect = document.getElementById('packages-per-page') as HTMLSelectElement
+    const sortSelect = document.getElementById('packages-sort') as HTMLSelectElement
+
+    const sortPackages = (packages: Package[], sortBy: string): Package[] => {
+      return [...packages].sort((a, b) => {
+        switch (sortBy) {
+          case 'name':
+            return a.name.localeCompare(b.name)
+          case 'size':
+            return (b.size || 0) - (a.size || 0) // Largest first
+          case 'size-asc':
+            return (a.size || 0) - (b.size || 0) // Smallest first
+          default:
+            return a.name.localeCompare(b.name)
+        }
+      })
+    }
+
+    const renderPackages = (packagesToRender: Package[], page: number = 1, perPage: number = 20) => {
+      const startIndex = (page - 1) * perPage
+      const endIndex = perPage === -1 ? packagesToRender.length : startIndex + perPage
+      const pagePackages = packagesToRender.slice(startIndex, endIndex)
+      
+      packagesGrid.innerHTML = pagePackages.map(pkg => `
+        <div class="package-card">
+          <div class="package-header">
+            <h4 class="package-name">${pkg.name}</h4>
+            <span class="package-version">${pkg.version}</span>
+          </div>
+          <div class="package-info">
+            <p class="package-description">${pkg.description || 'No description available'}</p>
+            ${pkg.size ? `<div class="package-size">${this.formatBytes(pkg.size)}</div>` : ''}
+            ${pkg.status ? `<div class="package-status status-${pkg.status}">${pkg.status}</div>` : ''}
+          </div>
+        </div>
+      `).join('')
+    }
+
+    const renderPagination = (totalItems: number, currentPage: number, perPage: number) => {
+      if (perPage === -1) {
+        pagination.innerHTML = ''
+        return
+      }
+
+      const totalPages = Math.ceil(totalItems / perPage)
+      if (totalPages <= 1) {
+        pagination.innerHTML = ''
+        return
+      }
+
+      let paginationHTML = '<div class="pagination-controls">'
+      
+      // Previous button
+      if (currentPage > 1) {
+        paginationHTML += `<button class="pagination-btn" data-page="${currentPage - 1}">Previous</button>`
+      }
+
+      // Page numbers
+      const startPage = Math.max(1, currentPage - 2)
+      const endPage = Math.min(totalPages, currentPage + 2)
+
+      if (startPage > 1) {
+        paginationHTML += `<button class="pagination-btn" data-page="1">1</button>`
+        if (startPage > 2) {
+          paginationHTML += `<span class="pagination-ellipsis">...</span>`
+        }
+      }
+
+      for (let i = startPage; i <= endPage; i++) {
+        const isActive = i === currentPage ? 'active' : ''
+        paginationHTML += `<button class="pagination-btn ${isActive}" data-page="${i}">${i}</button>`
+      }
+
+      if (endPage < totalPages) {
+        if (endPage < totalPages - 1) {
+          paginationHTML += `<span class="pagination-ellipsis">...</span>`
+        }
+        paginationHTML += `<button class="pagination-btn" data-page="${totalPages}">${totalPages}</button>`
+      }
+
+      // Next button
+      if (currentPage < totalPages) {
+        paginationHTML += `<button class="pagination-btn" data-page="${currentPage + 1}">Next</button>`
+      }
+
+      paginationHTML += '</div>'
+      pagination.innerHTML = paginationHTML
+
+      // Add pagination event listeners
+      pagination.querySelectorAll('.pagination-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const newPage = parseInt((e.target as HTMLButtonElement).dataset.page || '1')
+          currentPage = newPage
+          renderPackages(filteredPackages, currentPage, packagesPerPage)
+          renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+        })
+      })
+    }
+
+    // Search functionality
+    searchInput.addEventListener('input', (e) => {
+      const searchTerm = (e.target as HTMLInputElement).value.toLowerCase()
+      
+      filteredPackages = sortedPackages.filter(pkg => {
+        const packageName = pkg.name.toLowerCase()
+        const packageDesc = (pkg.description || '').toLowerCase()
+        return packageName.includes(searchTerm) || packageDesc.includes(searchTerm)
+      })
+      
+      currentPage = 1
+      renderPackages(filteredPackages, currentPage, packagesPerPage)
+      renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+    })
+
+    // Sort functionality
+    sortSelect.addEventListener('change', (e) => {
+      currentSort = (e.target as HTMLSelectElement).value
+      sortedPackages = sortPackages(packages, currentSort)
+      
+      // Re-filter based on current search term
+      const searchTerm = searchInput.value.toLowerCase()
+      filteredPackages = sortedPackages.filter(pkg => {
+        const packageName = pkg.name.toLowerCase()
+        const packageDesc = (pkg.description || '').toLowerCase()
+        return packageName.includes(searchTerm) || packageDesc.includes(searchTerm)
+      })
+      
+      currentPage = 1
+      renderPackages(filteredPackages, currentPage, packagesPerPage)
+      renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+    })
+
+    // Items per page functionality
+    perPageSelect.addEventListener('change', (e) => {
+      const newPerPage = (e.target as HTMLSelectElement).value
+      packagesPerPage = newPerPage === 'all' ? -1 : parseInt(newPerPage)
+      currentPage = 1
+      renderPackages(filteredPackages, currentPage, packagesPerPage)
+      renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+    })
+
+    // Initial render
+    renderPackages(filteredPackages, currentPage, packagesPerPage)
+    renderPagination(filteredPackages.length, currentPage, packagesPerPage)
   }
 
   renderSystemInfoCard(systemInfoStr: string, nodeStatus: string): string {
@@ -691,6 +1043,10 @@ class AtlasPanel {
           </div>
           <div class="detail-row">
             <span class="label">Disk Usage:</span>
+            <span class="value">${isOffline ? '--' : 'N/A'}</span>
+          </div>
+          <div class="detail-row">
+            <span class="label">Installed Packages:</span>
             <span class="value">${isOffline ? '--' : 'N/A'}</span>
           </div>
         </div>
@@ -744,6 +1100,10 @@ class AtlasPanel {
               <span class="metric-text">${sysInfo.disk_usage.toFixed(1)}% of ${this.formatBytes(sysInfo.disk_total)}</span>
             </div>
           </span>
+        </div>
+        <div class="detail-row">
+          <span class="label">Installed Packages:</span>
+          <span class="value">${sysInfo.package_count || 0} packages</span>
         </div>
       </div>
     `
