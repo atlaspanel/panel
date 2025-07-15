@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,6 +49,8 @@ type ShellSession struct {
 	stderr  io.ReadCloser
 	cleanup chan bool
 	mutex   sync.Mutex
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 type Agent struct {
@@ -302,11 +305,22 @@ func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 		shellCmd = "cmd"
 		shellArgs = []string{"/C", "cmd"}
 	default:
-		shellCmd = "/bin/bash"
-		shellArgs = []string{"-i"}
+		// Use script command to create a pseudo-terminal
+		// This prevents the shell from being stopped when running in background
+		shellCmd = "script"
+		shellArgs = []string{"-q", "-c", "/bin/bash", "/dev/null"}
+		
+		// Fallback to bash if script is not available
+		if _, err := exec.LookPath("script"); err != nil {
+			shellCmd = "/bin/bash"
+			shellArgs = []string{}
+		}
 	}
 
 	cmd := exec.Command(shellCmd, shellArgs...)
+	
+	// Set up environment
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	
 	// Create pipes for stdin, stdout, stderr
 	stdin, err := cmd.StdinPipe()
@@ -339,6 +353,7 @@ func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 		return nil
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	session := &ShellSession{
 		conn:    conn,
 		cmd:     cmd,
@@ -346,6 +361,8 @@ func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 		stdout:  stdout,
 		stderr:  stderr,
 		cleanup: make(chan bool, 1),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 
 	// Store session for management
@@ -367,6 +384,7 @@ func (a *Agent) createShellSession(conn *websocket.Conn) *ShellSession {
 
 func (a *Agent) handleShellSession(session *ShellSession) {
 	defer func() {
+		session.cancel()
 		session.cleanup <- true
 		session.conn.Close()
 		session.stdin.Close()
@@ -378,14 +396,29 @@ func (a *Agent) handleShellSession(session *ShellSession) {
 
 	// Goroutine to read from stdout and send to websocket
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Stdout goroutine panic recovered: %v", r)
+			}
+		}()
+		
 		scanner := bufio.NewScanner(session.stdout)
 		for scanner.Scan() {
+			select {
+			case <-session.ctx.Done():
+				log.Printf("Stdout goroutine cancelled")
+				return
+			default:
+			}
+			
 			output := scanner.Text() + "\n"
 			session.mutex.Lock()
 			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
 			session.mutex.Unlock()
 			if err != nil {
-				log.Printf("Failed to write stdout to websocket: %v", err)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("Stdout websocket connection closed: %v", err)
+				}
 				return
 			}
 		}
@@ -393,14 +426,29 @@ func (a *Agent) handleShellSession(session *ShellSession) {
 
 	// Goroutine to read from stderr and send to websocket
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Stderr goroutine panic recovered: %v", r)
+			}
+		}()
+		
 		scanner := bufio.NewScanner(session.stderr)
 		for scanner.Scan() {
+			select {
+			case <-session.ctx.Done():
+				log.Printf("Stderr goroutine cancelled")
+				return
+			default:
+			}
+			
 			output := scanner.Text() + "\n"
 			session.mutex.Lock()
 			err := session.conn.WriteMessage(websocket.TextMessage, []byte(output))
 			session.mutex.Unlock()
 			if err != nil {
-				log.Printf("Failed to write stderr to websocket: %v", err)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("Stderr websocket connection closed: %v", err)
+				}
 				return
 			}
 		}
@@ -408,10 +456,19 @@ func (a *Agent) handleShellSession(session *ShellSession) {
 
 	// Read from websocket and write to stdin
 	for {
+		select {
+		case <-session.ctx.Done():
+			log.Printf("Main websocket loop cancelled")
+			return
+		default:
+		}
+		
 		_, message, err := session.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("Websocket read error: %v", err)
+			} else {
+				log.Printf("Websocket connection closed normally")
 			}
 			break
 		}
