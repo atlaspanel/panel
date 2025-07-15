@@ -62,6 +62,7 @@ class AtlasPanel {
   private currentTerminal: NodeTerminal | SimpleTerminal | null = null
   private useSimpleTerminal = true // Use simple terminal by default
   private currentTheme: 'light' | 'dark' = 'light'
+  private previousNodeTab: string = 'overview'
 
   private getAuthHeaders(): HeadersInit {
     const headers: HeadersInit = {
@@ -515,7 +516,29 @@ class AtlasPanel {
         </div>
       </div>
 
-      <div class="node-details-grid">
+      <div class="node-page-layout">
+        <div class="node-mini-sidebar">
+          <h4>Node Settings</h4>
+          <ul class="node-sidebar-nav">
+            <li>
+              <button class="active" data-tab="overview">
+                <i class="fas fa-info-circle"></i>
+                Overview
+              </button>
+            </li>
+            ${isAdmin && node.status === 'online' ? `
+            <li>
+              <button data-tab="terminal">
+                <i class="fas fa-terminal"></i>
+                Terminal
+              </button>
+            </li>
+            ` : ''}
+          </ul>
+        </div>
+
+        <div class="node-main-content">
+          <div class="node-details-grid">
         <div class="detail-card">
           <h4>Connection Details</h4>
           <div class="detail-row">
@@ -571,25 +594,8 @@ class AtlasPanel {
             </div>
           </div>
         </div>
-
-        ${isAdmin && node.status === 'online' ? `
-        <div class="detail-card">
-          <h4>Remote Shell Access</h4>
-          <div class="shell-access-section">
-            <div class="shell-access-warning">
-              <i class="fas fa-exclamation-triangle"></i>
-              <div>
-                <strong>Security Warning:</strong> Shell access provides full control over the remote system. 
-                Only use this feature if you trust the node and understand the security implications.
-              </div>
-            </div>
-            <button class="shell-btn" onclick="panel.openShell('${node.id}', '${node.name}')">
-              <i class="fas fa-terminal"></i>
-              Open Shell
-            </button>
           </div>
         </div>
-        ` : ''}
       </div>
     `
 
@@ -601,6 +607,61 @@ class AtlasPanel {
           this.showPage('nodes')
         }
       })
+    }
+
+    // Set up node sidebar navigation
+    this.setupNodeSidebarNavigation(content)
+  }
+
+  setupNodeSidebarNavigation(content: Element): void {
+    const sidebarButtons = content.querySelectorAll('.node-sidebar-nav button')
+    
+    sidebarButtons.forEach(button => {
+      button.addEventListener('click', (e) => {
+        const clickedButton = e.target as HTMLElement
+        const tab = clickedButton.dataset.tab
+        
+        // Remove active class from all buttons
+        sidebarButtons.forEach(btn => btn.classList.remove('active'))
+        
+        // Add active class to clicked button
+        clickedButton.classList.add('active')
+        
+        // Handle tab switching (placeholder for now)
+        this.handleNodeTabSwitch(tab || 'overview')
+      })
+    })
+  }
+
+  handleNodeTabSwitch(tab: string): void {
+    console.log(`Switching to node tab: ${tab}`)
+    
+    switch (tab) {
+      case 'overview':
+        // Overview content is already displayed
+        this.previousNodeTab = tab
+        break
+      case 'terminal':
+        // Save the current tab before opening terminal
+        const currentActive = document.querySelector('.node-sidebar-nav button.active')
+        if (currentActive && currentActive.dataset.tab !== 'terminal') {
+          this.previousNodeTab = currentActive.dataset.tab || 'overview'
+        }
+        
+        // Open terminal for the current node
+        const nodeId = window.location.pathname.split('/').pop()
+        if (nodeId) {
+          // Find the node to get its name
+          this.getNodes().then(nodes => {
+            const node = nodes.find(n => n.id === nodeId)
+            if (node) {
+              this.openShell(node.id, node.name)
+            }
+          })
+        }
+        break
+      default:
+        console.warn('Unknown tab:', tab)
     }
   }
 
@@ -1599,6 +1660,15 @@ class AtlasPanel {
     // Handle ESC key to close terminal
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // Close terminal connection immediately
+        if (this.currentTerminal) {
+          try {
+            this.currentTerminal.dispose()
+          } catch (error) {
+            console.warn('Error disposing terminal on ESC:', error)
+          }
+          this.currentTerminal = null
+        }
         this.closeShell()
         document.removeEventListener('keydown', handleEscape)
       }
@@ -1608,6 +1678,11 @@ class AtlasPanel {
     // Handle click outside to close
     terminalContainer.addEventListener('click', (e) => {
       if (e.target === terminalContainer) {
+        // Close terminal connection immediately
+        if (this.currentTerminal) {
+          this.currentTerminal.dispose()
+          this.currentTerminal = null
+        }
         this.closeShell()
       }
     })
@@ -1620,14 +1695,44 @@ class AtlasPanel {
   }
 
   closeShell(): void {
+    // Only dispose if terminal still exists (avoid duplicate disposal)
     if (this.currentTerminal) {
-      this.currentTerminal.dispose()
+      try {
+        this.currentTerminal.dispose()
+      } catch (error) {
+        console.warn('Error disposing terminal:', error)
+      }
       this.currentTerminal = null
     }
 
     const terminalContainer = document.querySelector('.terminal-container')
     if (terminalContainer) {
       terminalContainer.remove()
+    }
+
+    // Return to the previous tab in the node sidebar
+    this.returnToPreviousNodeTab()
+  }
+
+  returnToPreviousNodeTab(): void {
+    // Only do this if we're on a node page
+    if (window.location.pathname.startsWith('/node/')) {
+      const sidebarButtons = document.querySelectorAll('.node-sidebar-nav button')
+      
+      // Remove active from all buttons
+      sidebarButtons.forEach(btn => btn.classList.remove('active'))
+      
+      // Find and activate the previous tab
+      const previousButton = document.querySelector(`.node-sidebar-nav button[data-tab="${this.previousNodeTab}"]`)
+      if (previousButton) {
+        previousButton.classList.add('active')
+      } else {
+        // Fallback to overview if previous tab button not found
+        const overviewButton = document.querySelector('.node-sidebar-nav button[data-tab="overview"]')
+        if (overviewButton) {
+          overviewButton.classList.add('active')
+        }
+      }
     }
   }
 

@@ -2077,3 +2077,88 @@ button:active {
   background: var(--background-card) !important;
   color: var(--text-primary) !important;
 }
+
+/* Node Page Mini Sidebar */
+.node-page-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.node-mini-sidebar {
+  width: 200px;
+  background: var(--background-card);
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  border: 1px solid var(--border-light);
+  padding: 20px 0;
+  flex-shrink: 0;
+}
+
+.node-mini-sidebar h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 16px 0;
+  padding: 0 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.node-sidebar-nav {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.node-sidebar-nav li {
+  margin: 2px 12px;
+}
+
+.node-sidebar-nav button {
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.node-sidebar-nav button:hover {
+  background: var(--primary-green-pale);
+  color: var(--text-primary);
+  transform: none;
+}
+
+.node-sidebar-nav button.active {
+  background: var(--primary-green);
+  color: white;
+}
+
+.node-sidebar-nav button.active:hover {
+  background: var(--primary-green-dark);
+}
+
+.node-sidebar-nav button i {
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.node-main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Dark mode mini sidebar adjustments */
+[data-theme="dark"] .node-mini-sidebar {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
