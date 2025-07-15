@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -56,6 +57,22 @@ type SystemInfo struct {
 	Uptime       uint64    `json:"uptime"`
 	Packages     []Package `json:"packages,omitempty"`
 	PackageCount int       `json:"package_count"`
+}
+
+type PackageUpdateRequest struct {
+	PackageName string `json:"package_name" binding:"required"`
+	Command     string `json:"command" binding:"required"` // "update" or "install"
+}
+
+type PackageUpdateSession struct {
+	ID       string `json:"id"`
+	NodeID   string `json:"node_id"`
+	Package  string `json:"package"`
+	Command  string `json:"command"`
+	Status   string `json:"status"` // "running", "completed", "failed"
+	Output   string `json:"output"`
+	Started  time.Time `json:"started"`
+	Finished *time.Time `json:"finished,omitempty"`
 }
 
 type User struct {
@@ -134,12 +151,14 @@ type RateLimiter struct {
 }
 
 type API struct {
-	db          *sql.DB
-	config      *Config
-	upgrader    websocket.Upgrader
-	shells      map[string]*ShellProxy
-	shellMu     sync.RWMutex
-	rateLimiter *RateLimiter
+	db              *sql.DB
+	config          *Config
+	upgrader        websocket.Upgrader
+	shells          map[string]*ShellProxy
+	shellMu         sync.RWMutex
+	rateLimiter     *RateLimiter
+	packageSessions map[string]*PackageUpdateSession
+	packageMu       sync.RWMutex
 }
 
 func main() {
@@ -185,6 +204,7 @@ func main() {
 			limit:    30, // 30 requests per minute
 			window:   time.Minute,
 		},
+		packageSessions: make(map[string]*PackageUpdateSession),
 	}
 	api.initDB()
 
@@ -246,6 +266,10 @@ func main() {
 		authorized.GET("/nodes", api.getNodes)
 		authorized.POST("/nodes", api.requireAdmin(), api.createNode)
 		authorized.DELETE("/nodes/:id", api.requireAdmin(), api.deleteNode)
+		
+		// Package management routes (admin only)
+		authorized.POST("/nodes/:id/packages/update", api.requireAdmin(), api.updatePackage)
+		authorized.GET("/nodes/:id/packages/update/:sessionId", api.requireAdmin(), api.getUpdateStatus)
 		
 		// Webhook routes (admin only)
 		authorized.GET("/webhooks", api.requireAdmin(), api.getWebhooks)
@@ -451,6 +475,177 @@ func (api *API) deleteNode(c *gin.Context) {
 	})
 
 	c.JSON(200, gin.H{"message": "Node deleted"})
+}
+
+func (api *API) updatePackage(c *gin.Context) {
+	nodeID := c.Param("id")
+	
+	var req PackageUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request body"})
+		return
+	}
+	
+	// Validate command
+	if req.Command != "update" && req.Command != "install" {
+		c.JSON(400, gin.H{"error": "Invalid command, must be 'update' or 'install'"})
+		return
+	}
+	
+	// Get node information
+	var node Node
+	err := api.db.QueryRow("SELECT id, name, url, key, status FROM nodes WHERE id = ?", nodeID).
+		Scan(&node.ID, &node.Name, &node.URL, &node.Key, &node.Status)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "Node not found"})
+		return
+	}
+	
+	if node.Status != "online" {
+		c.JSON(400, gin.H{"error": "Node must be online to update packages"})
+		return
+	}
+	
+	// Create update session
+	sessionID := uuid.New().String()
+	session := &PackageUpdateSession{
+		ID:      sessionID,
+		NodeID:  nodeID,
+		Package: req.PackageName,
+		Command: req.Command,
+		Status:  "running",
+		Output:  "",
+		Started: time.Now(),
+	}
+	
+	// Store session
+	api.packageMu.Lock()
+	api.packageSessions[sessionID] = session
+	api.packageMu.Unlock()
+	
+	// Start package update in goroutine
+	go api.executePackageUpdate(session, node)
+	
+	c.JSON(200, gin.H{
+		"session_id": sessionID,
+		"status":     "running",
+		"message":    "Package update started",
+	})
+}
+
+func (api *API) getUpdateStatus(c *gin.Context) {
+	sessionID := c.Param("sessionId")
+	
+	api.packageMu.RLock()
+	session, exists := api.packageSessions[sessionID]
+	api.packageMu.RUnlock()
+	
+	if !exists {
+		c.JSON(404, gin.H{"error": "Update session not found"})
+		return
+	}
+	
+	c.JSON(200, session)
+}
+
+func (api *API) executePackageUpdate(session *PackageUpdateSession, node Node) {
+	defer func() {
+		if r := recover(); r != nil {
+			api.packageMu.Lock()
+			session.Status = "failed"
+			session.Output += fmt.Sprintf("\nPanic occurred: %v", r)
+			now := time.Now()
+			session.Finished = &now
+			api.packageMu.Unlock()
+		}
+	}()
+	
+	// Prepare the request to the node agent
+	requestBody := map[string]string{
+		"package": session.Package,
+		"command": session.Command,
+	}
+	
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		api.packageMu.Lock()
+		session.Status = "failed"
+		session.Output += fmt.Sprintf("Failed to marshal request: %v", err)
+		now := time.Now()
+		session.Finished = &now
+		api.packageMu.Unlock()
+		return
+	}
+	
+	// Send request to node agent
+	client := &http.Client{Timeout: 300 * time.Second} // 5 minute timeout
+	// Ensure proper URL construction - remove any trailing slash from node.URL
+	nodeURL := strings.TrimRight(node.URL, "/")
+	updateURL := nodeURL + "/package/update"
+	log.Printf("Sending package update request to: %s", updateURL)
+	req, err := http.NewRequest("POST", updateURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		api.packageMu.Lock()
+		session.Status = "failed"
+		session.Output += fmt.Sprintf("Failed to create request: %v", err)
+		now := time.Now()
+		session.Finished = &now
+		api.packageMu.Unlock()
+		return
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", node.Key)
+	
+	log.Printf("Request headers: Content-Type=%s, Authorization=%s", req.Header.Get("Content-Type"), req.Header.Get("Authorization"))
+	log.Printf("Request body: %s", string(jsonData))
+	
+	api.packageMu.Lock()
+	session.Output += fmt.Sprintf("Starting %s of package %s...\n", session.Command, session.Package)
+	api.packageMu.Unlock()
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		api.packageMu.Lock()
+		session.Status = "failed"
+		session.Output += fmt.Sprintf("Failed to send request to node: %v", err)
+		now := time.Now()
+		session.Finished = &now
+		api.packageMu.Unlock()
+		return
+	}
+	defer resp.Body.Close()
+	
+	log.Printf("Response status: %d", resp.StatusCode)
+	log.Printf("Response headers: %v", resp.Header)
+	
+	// Read response body
+	var responseBody bytes.Buffer
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Printf("Response line: %s", line)
+		api.packageMu.Lock()
+		session.Output += line + "\n"
+		api.packageMu.Unlock()
+		responseBody.WriteString(line + "\n")
+	}
+	
+	api.packageMu.Lock()
+	defer api.packageMu.Unlock()
+	
+	now := time.Now()
+	session.Finished = &now
+	
+	if resp.StatusCode != 200 {
+		session.Status = "failed"
+		session.Output += fmt.Sprintf("\nNode returned error status: %d", resp.StatusCode)
+		log.Printf("Package update failed with status %d", resp.StatusCode)
+	} else {
+		session.Status = "completed"
+		session.Output += "\nPackage update completed successfully"
+		log.Printf("Package update completed successfully")
+	}
 }
 
 func (api *API) heartbeat(c *gin.Context) {

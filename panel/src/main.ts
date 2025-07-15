@@ -905,6 +905,16 @@ class AtlasPanel {
             ${pkg.size ? `<div class="package-size">${this.formatBytes(pkg.size)}</div>` : ''}
             ${pkg.status ? `<div class="package-status status-${pkg.status}">${pkg.status}</div>` : ''}
           </div>
+          <div class="package-actions">
+            <button class="package-update-btn" onclick="panel.updatePackage('${pkg.name}', 'update')">
+              <i class="fas fa-arrow-up"></i>
+              Update
+            </button>
+            <button class="package-install-btn" onclick="panel.updatePackage('${pkg.name}', 'install')">
+              <i class="fas fa-download"></i>
+              Reinstall
+            </button>
+          </div>
         </div>
       `).join('')
     }
@@ -1015,6 +1025,127 @@ class AtlasPanel {
     // Initial render
     renderPackages(filteredPackages, currentPage, packagesPerPage)
     renderPagination(filteredPackages.length, currentPage, packagesPerPage)
+  }
+
+  async updatePackage(packageName: string, command: string): Promise<void> {
+    const nodeId = window.location.pathname.split('/').pop()
+    if (!nodeId) {
+      alert('No node selected')
+      return
+    }
+
+    try {
+      const response = await fetch(`${this.apiUrl}/nodes/${nodeId}/packages/update`, {
+        method: 'POST',
+        headers: this.getAuthHeaders(),
+        body: JSON.stringify({
+          package_name: packageName,
+          command: command
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to start package update')
+      }
+
+      const data = await response.json()
+      this.showPackageUpdateTerminal(packageName, command, data.session_id)
+    } catch (error) {
+      console.error('Failed to update package:', error)
+      alert(`Failed to update package: ${error}`)
+    }
+  }
+
+  showPackageUpdateTerminal(packageName: string, command: string, sessionId: string): void {
+    // Create terminal overlay
+    const overlay = document.createElement('div')
+    overlay.className = 'package-terminal-overlay'
+    overlay.innerHTML = `
+      <div class="package-terminal-modal">
+        <div class="package-terminal-header">
+          <h3>Package ${command}: ${packageName}</h3>
+          <button class="close-terminal" onclick="this.parentElement.parentElement.parentElement.remove()">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+        <div class="package-terminal-content">
+          <div class="terminal-output" id="terminal-output-${sessionId}">
+            <div class="terminal-line">Starting ${command} of ${packageName}...</div>
+          </div>
+        </div>
+        <div class="package-terminal-footer">
+          <span class="terminal-status" id="terminal-status-${sessionId}">Running...</span>
+        </div>
+      </div>
+    `
+    
+    document.body.appendChild(overlay)
+    
+    // Start polling for updates
+    this.pollPackageUpdateStatus(sessionId)
+  }
+
+  private async pollPackageUpdateStatus(sessionId: string): Promise<void> {
+    const nodeId = window.location.pathname.split('/').pop()
+    if (!nodeId) return
+
+    const outputElement = document.getElementById(`terminal-output-${sessionId}`)
+    const statusElement = document.getElementById(`terminal-status-${sessionId}`)
+    
+    if (!outputElement || !statusElement) return
+
+    let lastOutputLength = 0
+
+    const poll = async () => {
+      try {
+        const response = await fetch(`${this.apiUrl}/nodes/${nodeId}/packages/update/${sessionId}`, {
+          headers: this.getAuthHeaders()
+        })
+
+        if (!response.ok) {
+          throw new Error('Failed to get update status')
+        }
+
+        const data = await response.json()
+        
+        // Update output if new content is available
+        if (data.output && data.output.length > lastOutputLength) {
+          const newOutput = data.output.substring(lastOutputLength)
+          lastOutputLength = data.output.length
+          
+          newOutput.split('\n').forEach((line: string) => {
+            if (line.trim()) {
+              const lineElement = document.createElement('div')
+              lineElement.className = 'terminal-line'
+              lineElement.textContent = line
+              outputElement.appendChild(lineElement)
+            }
+          })
+          
+          // Auto-scroll to bottom
+          outputElement.scrollTop = outputElement.scrollHeight
+        }
+        
+        // Update status
+        statusElement.textContent = data.status === 'running' ? 'Running...' : 
+                                   data.status === 'completed' ? 'Completed' : 
+                                   data.status === 'failed' ? 'Failed' : data.status
+        
+        statusElement.className = `terminal-status ${data.status}`
+        
+        // Continue polling if still running
+        if (data.status === 'running') {
+          setTimeout(poll, 1000) // Poll every second
+        }
+      } catch (error) {
+        console.error('Error polling update status:', error)
+        statusElement.textContent = 'Error getting status'
+        statusElement.className = 'terminal-status failed'
+      }
+    }
+
+    poll()
   }
 
   renderSystemInfoCard(systemInfoStr: string, nodeStatus: string): string {

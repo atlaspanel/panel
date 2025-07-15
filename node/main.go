@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -51,6 +52,11 @@ type SystemInfo struct {
 	Uptime       uint64    `json:"uptime"`
 	Packages     []Package `json:"packages,omitempty"`
 	PackageCount int       `json:"package_count"`
+}
+
+type PackageUpdateRequest struct {
+	Package string `json:"package"`
+	Command string `json:"command"`
 }
 
 type ShellSession struct {
@@ -176,6 +182,7 @@ func (a *Agent) startServer() {
 	})
 
 	http.HandleFunc("/shell", a.handleShellConnection)
+	http.HandleFunc("/package/update", a.handlePackageUpdate)
 
 	log.Printf("Starting node server on :3040")
 	if err := http.ListenAndServe(":3040", nil); err != nil {
@@ -301,6 +308,144 @@ func (a *Agent) getSystemInfo() (SystemInfo, error) {
 	sysInfo.PackageCount = len(packages)
 
 	return sysInfo, nil
+}
+
+func (a *Agent) handlePackageUpdate(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Package update request received: %s %s", r.Method, r.URL.Path)
+	
+	// Authenticate the request using the node key
+	authKey := r.Header.Get("Authorization")
+	if authKey != a.config.Key {
+		log.Printf("Package update denied: invalid authentication key. Got: %s, Expected: %s", authKey, a.config.Key)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != "POST" {
+		log.Printf("Package update denied: invalid method %s", r.Method)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Only allow on Linux systems
+	if runtime.GOOS != "linux" {
+		http.Error(w, "Package updates only supported on Linux", http.StatusBadRequest)
+		return
+	}
+
+	var req PackageUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate package name to prevent command injection
+	if !isValidPackageName(req.Package) {
+		http.Error(w, "Invalid package name", http.StatusBadRequest)
+		return
+	}
+
+	// Set response headers for streaming
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	// Flush headers immediately
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	log.Printf("Starting package %s for %s", req.Command, req.Package)
+	
+	// Build the command
+	var cmd *exec.Cmd
+	if req.Command == "update" {
+		cmd = exec.Command("apt-get", "update")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(w, "Failed to update package list: %v\n", err)
+			return
+		}
+		fmt.Fprintf(w, "Package list updated successfully\n")
+		
+		// Now upgrade the specific package
+		cmd = exec.Command("apt-get", "install", "--only-upgrade", "-y", req.Package)
+	} else if req.Command == "install" {
+		cmd = exec.Command("apt-get", "install", "-y", req.Package)
+	} else {
+		http.Error(w, "Invalid command", http.StatusBadRequest)
+		return
+	}
+
+	// Set environment variables
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+
+	// Set up pipes for real-time output
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(w, "Failed to create stdout pipe: %v\n", err)
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		fmt.Fprintf(w, "Failed to create stderr pipe: %v\n", err)
+		return
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(w, "Failed to start command: %v\n", err)
+		return
+	}
+
+	// Stream output in real-time
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "STDOUT: %s\n", scanner.Text())
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			fmt.Fprintf(w, "STDERR: %s\n", scanner.Text())
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}()
+
+	// Wait for command to complete
+	err = cmd.Wait()
+	if err != nil {
+		fmt.Fprintf(w, "Command failed: %v\n", err)
+	} else {
+		fmt.Fprintf(w, "Package %s completed successfully\n", req.Command)
+	}
+}
+
+func isValidPackageName(name string) bool {
+	// Basic validation to prevent command injection
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+	
+	// Allow alphanumeric characters, hyphens, dots, and plus signs
+	for _, char := range name {
+		if !((char >= 'a' && char <= 'z') || 
+			 (char >= 'A' && char <= 'Z') || 
+			 (char >= '0' && char <= '9') || 
+			 char == '-' || char == '.' || char == '+') {
+			return false
+		}
+	}
+	
+	return true
 }
 
 func (a *Agent) sendHeartbeat() {
