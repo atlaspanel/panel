@@ -1,5 +1,7 @@
 # Atlas Panel
 
+*Atlas Panel is no longer maintained, please do not use it for anything at all.*
+
 <div align="center">
   <img src="assets/logo-transparent.png" alt="Atlas Panel Logo" width="120" height="120">
   <h3>Server Management System</h3>
